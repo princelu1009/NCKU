@@ -1,0 +1,6 @@
+# Only track paper notes; ignore Obsidian/plugin settings and scratch files
+/*
+!/.gitignore
+!/*.md
+/歡迎.md
+/未命名.md
