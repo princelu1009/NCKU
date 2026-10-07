@@ -26,50 +26,194 @@ Z. Lai, H. Li, Y. Wang, Q. Wu, Y. Deng, J. Liu, Y. Li, J. Wu, "Achieving Resilie
   - **Proactive（FCP、R3、Keep-forwarding、Plinko、SlickPackets、OPSPF 等）**：要為所有故障情境預算備用路由。情境數為 $\sum_{m=1}^{M}\sum_{p=1}^{N}\binom{|L_m|}{p}$（M 個 snapshot × 最多 N 條突發斷線）。Starlink 的 $|L_m|>3000$，拓樸每幾十秒就變一次，CPU 和 memory 都扛不住。
 
 ## 2. Problem Formulation（P1：RSRP）
-- 圖 $G=(V,L)$，$V=S\cup U$（P 顆衛星＋Q 個地面站）。雷射 ISL 是點對點；無線 GSL 則是一顆衛星同時連多個地面站，共享容量。
-- 故障事件 $\pi^k_t: L_t \to L_{t+1}$ 讓拓樸隨時間變化，形成 $G^{all}=\{G_t\}$。Node failure 視為其所有鏈路失效。
-- 流量需求 $f_{ab}=\{st, et, d\}$；二元變數 $\gamma_{ab}(i,j,t)$ 表示流量 $f_{ab}$ 在時槽 t 是否經過鏈路 (i,j)。
-- 限制：(1) flow conservation；(2) 鏈路容量；(5) 延遲 $\le D_{ab}=\alpha D^{sp}_{ab}$（α ≥ 1 倍最短路徑延遲）；(6) 每條鏈路的負載 ≤ MLU。
-- 目標：**min MLU**（maximum link utilization），留出餘裕吸收突發流量和故障。
-- 每次故障都要在新的 $G_t$ 上快速解一次 ILP，這正是困難所在。
+### 2.1 符號表
+| 符號 | 意義 | 例子（台北 → LA 故事） |
+|---|---|---|
+| $S=\{s_1,\dots,s_P\}$ | 所有衛星，共 P 顆 | Starlink 第一 shell，P = 1584 |
+| $U=\{u_1,\dots,u_Q\}$ | 所有地面站，共 Q 個 | 台北站、LA 站…… |
+| $V=S\cup U$ | 網路裡所有節點 | |
+| $(i,j)$ | 一條鏈路（ISL 或 GSL），雙向 | 台北–A（GSL）、A–B（ISL） |
+| $L$、$L_t$ | 所有可用鏈路；$L_t$ 是時槽 t 可用的鏈路 | |
+| $T=\{t_1,t_2,\dots\}$ | 時間切成的時槽 | |
+| $\pi^k_t: L_t\to L_{t+1}$ | 第 k 個故障事件：把時槽 t 的可用鏈路集合變成 t+1 的 | t = 30 s 換手、t = 45 s M 被毀 |
+| $G_t=(V,L_t)$ | 時槽 t 的網路圖；$G^{all}=\{G_t\}$ 是所有時槽的圖 | |
+| $f_{ab}=\{st_{f_{ab}}, et_{f_{ab}}, d_{f_{ab}}\}$ | 從 a 到 b 的流量需求：開始時槽、結束時槽、頻寬需求 | 台北 → LA 影片，0–90 s，需要 d |
+| $F$ | 所有流量需求的集合（流量矩陣） | |
+| $b_{ij}$ | 鏈路 (i,j) 在 i→j 方向的容量 | |
+| $l_{ij}$ | 鏈路 (i,j) 的延遲 | |
+| $\gamma_{ab}(i,j,t)\in\{0,1\}$ | **決策變數**：流量 $f_{ab}$ 在時槽 t 是否經過鏈路 (i,j) | |
+| $r^t_{ab}=\{\gamma_{ab}(i,j,t)\}$ | $f_{ab}$ 在時槽 t 的路徑 | |
+| $R_t$ | 時槽 t 所有流量的路徑集合（routing scheme） | |
+| $D^{sp}_{ab}$ | a 到 b 最短路徑的延遲 | |
+| $\alpha\ge 1$ | 允許比最短路徑慢多少倍 | α = 1.5 |
+| $D_{ab}=\alpha D^{sp}_{ab}$ | $f_{ab}$ 的延遲上限 | |
+| MLU | 所有鏈路中最高的使用率（maximum link utilization） | |
+
+### 2.2 限制式與目標
+- **(1) Flow conservation**：對每個節點 v，
+  $\sum_w \gamma_{ab}(v,w,t) - \sum_w \gamma_{ab}(w,v,t) = 1$（v = a）、$-1$（v = b）、0（其他）。
+  意思：從 a 出去一份流量、在 b 收到一份，中間節點進多少就出多少，所以 a 到 b 一定有一條連通的路。
+- **(2) Capacity**：$\sum_{a,b}\gamma_{ab}(i,j,t)\cdot d_{f_{ab}} \le b_{ij}$。
+  意思：所有經過 (i,j) 的流量（$\gamma=1$ 的那些 $d$ 相加），不能超過這條鏈路的容量 $b_{ij}$。
+- **(3) MLU 定義**：$\text{MLU}=\max_{t,(i,j)} \dfrac{\sum_{a,b} d_{f_{ab}}\,\gamma_{ab}(i,j,t)}{b_{ij}}$。
+  意思：每條鏈路「實際負載 ÷ 容量」= 使用率，MLU 是其中最大的那個。
+- **(5) Latency**：$\sum_{(i,j)\in L_t}\gamma_{ab}(i,j,t)\cdot l_{ij} \le D_{ab}$。
+  意思：$f_{ab}$ 走過的每條鏈路延遲 $l_{ij}$ 加總（= 路徑延遲），不能超過上限 $D_{ab}=\alpha D^{sp}_{ab}$。
+- **(6) MLU 上限**：每條鏈路的負載 $\sum_{a,b}\gamma_{ab}(i,j,t)\cdot d_{f_{ab}} \le \text{MLU}\cdot b_{ij}$（把 (3) 寫成限制式）。
+- **(4) 目標**：$\min \text{MLU}$，讓最忙的鏈路盡量閒，留餘裕吸收突發流量和故障。
+- **困難所在**：$\gamma$ 是 0/1，所以這是 ILP；而每個故障事件 $\pi^k_t$ 都會產生新的 $G_t$，必須在新圖上**快速**重解一次。
 
 ## 3. Method
 ### 3.1 TSM（Topology-Stabilizing Model）：把拓樸變化轉成流量變化
-兩個 surjection：graph $\phi: G^T \to \hat G$，traffic $\omega: F \to \hat F$。
+TSM 由兩個 surjection（多對一映射）組成：
+- **Graph surjection** $\phi: G^T \to \hat G$：把隨時間變化的圖序列 $G^T=\{G_t\}$ 對應到**一張固定的邏輯圖** $\hat G=(\hat V,\hat L)$。
+- **Traffic surjection** $\omega: F \to \hat F$：把原本的流量矩陣 $F$ 轉成定義在 $\hat G$ 上的新流量矩陣 $\hat F$。
 
-**穩定的邏輯拓樸 $\hat G$（Alg. 1）**
-- 每顆衛星 $s_i$ 在 $\hat G$ 裡有一個鏡像，另外再配一個 **virtual terrestrial node $vs_i$**，代表「此刻連到 $s_i$ 的所有地面站」。所以 $\hat G$ 共有 2P 個節點。
-- 邏輯鏈路 $(s_i, vs_i)$ 的容量等於 $s_i$ 的 GSL 容量，而且**永遠存在**（沒有地面站連上時，就只是沒有流量）。
-- ISL 照實體連線方式複製（同軌道前後 2 條、相鄰軌道左右 2 條，+Grid）。
-- 為什麼穩定：Walker Delta 同一個 shell 內的衛星高度、速度都相同，相對位置固定，所以 ISL 拓樸不變；GSL 的變化則被 $vs_i$ 吸收掉了。
+#### (a) 建立固定的邏輯圖 $\hat G$（Alg. 1）
+| 新符號 | 意義 | 例子 |
+|---|---|---|
+| $\hat V$ | 邏輯圖的節點：每顆衛星 $s_i$ 的鏡像＋它的虛擬地面節點 $vs_i$，共 2P 個 | A, vs_A, B, vs_B, …, Z, vs_Z |
+| $vs_i$ | **virtual terrestrial node**：「此刻連到 $s_i$ 的所有地面站」的集合；沒人連時為 ∅ | 0–30 s 的 vs_A = {台北站} |
+| $(s_i, vs_i)$ | 邏輯 GSL，容量 = $s_i$ 的 GSL 容量，**永遠存在** | |
+| $\hat L$ | 邏輯鏈路：所有 $(s_i,vs_i)$＋照實體連線複製的 ISL（+Grid，每顆 4 條） | |
 
-**把故障轉成流量（Alg. 2）**
-- **Predictable（GSL handover）**：一條長時間的流量 $f_{ab}$，切成多段**依時間接續的短流量**，每段的端點是「當時服務 a、b 的那兩顆衛星的 $vs$」。
-- **Unexpected（鏈路故障）**：在故障鏈路 (i,j) 上加一條 **burst flow** $f^{burst}=\{t_s, t_e, b_{ij}\}$，流量等於整條鏈路的容量，延遲要求設為該鏈路的延遲，強迫它走這條鏈路。結果是這條鏈路被「塞滿」，其他流量自然會避開。
+步驟：
+1. 對每顆衛星 $s\in S$：建立 $vs$，把 $s$ 和 $vs$ 加進 $\hat V$。
+2. 建立鏈路 $(s, vs)$，容量設為 $s$ 的 GSL 容量，加進 $\hat L$。
+3. 把 $G^T$ 中所有 ISL 複製到 $\hat L$。
 
-**白話範例（論文 Fig. 3）**：3 顆衛星 S1、S2、S3，2 個地面站 GS1、GS2，流量從 GS1 到 GS2，時間 [t1, t3)。
-- 時槽 1：GS1–S1、GS2–S2；時槽 2 發生 handover，變成 GS1–S2、GS2–S3；同時 S1–S2 的 ISL 突然故障。
-- TSM 的處理：流量切成 $f_{v1,v2}=\{t1,t2,D\}$ 和 $f_{v2,v3}=\{t2,t3,D\}$，另外在 S1–S2 加上 $\{t2,t3,\text{Cap}(S1,S2)\}$ 的 burst flow。
-- 拓樸 $\hat G$ 從頭到尾都沒變，只有流量矩陣在變。
+為什麼 $\hat G$ 不會變：
+- **ISL 部分**：Walker Delta 同一 shell 內的衛星高度、速度相同，相對位置固定，所以 +Grid 的 ISL 不變。
+- **GSL 部分**：換手只會改變「$vs_i$ 實際代表哪些地面站」，但邏輯鏈路 $(s_i, vs_i)$ 本身一直存在。
 
-**轉換後的問題（P2）**：在固定的 $\hat G$ 上，給定隨時間變化的 $\hat F$，求滿足 (1)(2)(5)(6) 的動態路由。這變成一個 dynamic routing scheduling 問題，不必再對無數種拓樸預算。
+#### (b) 把故障轉成流量（Alg. 2）
+| 新符號 | 意義 |
+|---|---|
+| $\hat F=\omega(F)$ | 轉換後、定義在 $\hat G$ 上的流量矩陣 |
+| find$(\hat G, a, t)$ | 在時槽 t，原本的端點 a 對應到 $\hat G$ 的哪個 $vs$（即「a 此刻連在哪顆衛星下」） |
+| $f_{sd}$ | 轉換後的一段短流量，從 $vs$ 端點 s 到 d，只持續一個時槽 |
+| $[t_s, t_e)$ | 突發故障的開始、結束時槽 |
+| $f^{burst}=\{t_s,t_e,b_{ij}\}$ | 代表故障的假流量：在 $[t_s,t_e)$ 期間，需求 = 該鏈路容量 $b_{ij}$ |
 
-剩下兩個問題：$\hat F$ 變得非常大，直接用 LP 求解很慢；而且突發故障造成的 burst flow 無法事先知道。
+步驟：
+1. **可預測故障（GSL 換手）**：對每個 $f_{ab}\in F$、它持續期間的每個時槽 t（從 $st_{f_{ab}}$ 到 $et_{f_{ab}}$）：
+   - $s$ = find$(\hat G, a, t)$，$d$ = find$(\hat G, b, t)$；
+   - 建立 $f_{sd}=\{t, t+1, d_{f_{ab}}\}$ 加進 $\hat F$。
+   - 結果：一條長流量被切成**依時間接續的多段短流量**，每段的端點是「當下服務 a、b 的衛星的 $vs$」。
+2. **突發故障**：對每個在 $[t_s,t_e)$ 故障的鏈路 (i,j)：
+   - 建立 $f^{burst}=\{t_s,t_e,b_{ij}\}$ 加進 $\hat F$，並把它的延遲上限設為 $l_{ij}$，強迫它只能走 (i,j)。
+   - 結果：(i,j) 被假流量**塞滿**，在 (2) 容量限制下，其他流量自然會避開。
+
+#### (c) 論文 Fig. 3 的小例子
+3 顆衛星 S1、S2、S3，地面站 GS1、GS2；需求 $f_{GS1,GS2}=\{t_1,t_3,D\}$。
+- 時槽 1 $[t_1,t_2)$：GS1–S1、GS2–S2。
+- 時槽 2 $[t_2,t_3)$：換手成 GS1–S2、GS2–S3；同時 ISL S1–S2 突然故障。
+- TSM 轉換後：
+  - $f_{v1,v2}=\{t_1,t_2,D\}$、$f_{v2,v3}=\{t_2,t_3,D\}$（可預測換手 → 兩段短流量）；
+  - $f_{S1,S2}=\{t_2,t_3,\text{Cap}(S1,S2)\}$，其中 $\text{Cap}(S1,S2)=b_{S1,S2}$（突發故障 → burst flow）。
+- $\hat G$ 從頭到尾不變，只有 $\hat F$ 在變。
+
+#### (d) 轉換後的問題（P2）
+給定固定的 $\hat G$ 和隨時間變化的 $\hat F$，求一組動態路由 $R_T$，滿足 (1)(2)(5)(6)，並最小化 MLU。不必再對無數種拓樸各算一次。
+
+剩下兩個實務問題：
+1. $\hat F$ 變得非常大（每條流量被切成很多段），直接用 LP／ILP 求解很慢。
+2. $\hat F$ 裡的 burst flow 來自突發故障，無法事先知道。
+
+→ 3.2 的 hybrid routing 就是為了解決這兩點。
 
 ### 3.2 Adaptive Hybrid Routing
-將 $\hat F = \hat F_{pr} + \hat F_{up}$ 分成可預測和突發兩部分。
+把 $\hat F$ 拆成兩部分：$\hat F = \hat F_{pr} + \hat F_{up}$。
+- $\hat F_{pr}$（predictable）：換手造成的短流量，**事先知道** → 交給 basic routing。
+- $\hat F_{up}$（unexpected）：突發故障的 burst flow，**事先不知道** → 先交給 protection routing 應急，再讓 basic routing 重算。
 
-**Basic routing（處理可預測故障，離線計算、上線時配置）**：用 Gurobi 當 constraint optimizer，加上兩個加速方法：
-- **Path filtering**：估計流量 $f_{ab}$ 若經過鏈路 (i,j) 的路徑長度 $p^{ij}_{ab}$ = great-circle(a,i) + |(i,j)| + great-circle(j,b)。若 $p^{ij}_{ab} \ge D_{ab}$，就不考慮這條鏈路，藉此刪掉大量 $\gamma$ 變數（離 a→b 地面投影太遠的衛星不會被用到）。
-- **Merging demands**：同一時槽、同一組 src–dst 的需求合併成一筆，減少限制式數量。
+#### (a) Basic routing（處理 $\hat F_{pr}$：離線計算、上線時按表配置）
+用 Gurobi 當 constraint optimizer 解 P2，並用兩個方法縮小問題：
 
-**Protection routing：LGPR（Alg. 3，處理突發故障）**
-- 每顆衛星用 (orbit index p, intra-orbit index q) 標示位置；同一 shell 內的相對位置固定。
-- 收到封包時，在可用的鄰居中選**離目的地最近**的那個轉送（本地決策，不需要收斂）。
-- **Loop avoidance**：如果某顆衛星只剩一條可用鏈路（dead end），就通知鄰居暫時把它視為不可用，避免封包在死路上來回。
-- 用 IPv6 Hop-by-Hop header 裡的 **1-bit protection flag** 標示封包要走 basic 還是 protection routing。
+**Path filtering（刪掉不可能用到的 $\gamma$ 變數）**
+| 符號 | 意義 |
+|---|---|
+| $p^{ij}_{ab}$ | 估計「$f_{ab}$ 如果經過鏈路 (i,j)」的路徑長度 |
+| great-circle$(a,i)$ | a 到衛星 i 的地面投影的大圓距離 |
+| $\lvert(i,j)\rvert$ | 鏈路 (i,j) 的長度 |
 
-**運作流程**：平時走 basic routing → 發生突發故障 → 受影響的節點立刻切到 LGPR 在本地繞過，**同時**通知 basic routing 把 burst flow 加進 $\hat F$ 重新計算 → 新的路由算好後切回 basic routing。
+- $p^{ij}_{ab}$ = great-circle$(a,i)$ + $\lvert(i,j)\rvert$ + great-circle$(j,b)$。
+- 若 $p^{ij}_{ab}\ge D_{ab}$（已經超過延遲上限），這條鏈路不可能出現在 $f_{ab}$ 的合法路徑上，就直接把 $\gamma_{ab}(i,j,t)$ 刪掉（固定為 0）。
+- 直覺：離 a→b 地面連線太遠的衛星，不會被拿來載這條流量。
+
+**Merging demands（減少限制式）**
+- 同一時槽、同一組 src–dst 的兩筆需求 $f^1_{ab}$、$f^2_{ab}$ 合併成一筆，頻寬 = $d_{f^1_{ab}}+d_{f^2_{ab}}$。
+
+#### (b) Protection routing：LGPR（處理 $\hat F_{up}$，Alg. 3）
+| 符號 | 意義 |
+|---|---|
+| $(p,q)$ | 衛星的位置索引：第 p 個 orbit 的第 q 顆；同一 shell 內相對位置固定 |
+| $pkt_{dst}$ | 要送往 dst 的封包 |
+| protection flag | IPv6 Hop-by-Hop header 中的 1 bit；true = 走 LGPR，false = 走 basic routing |
+| in_link | 封包進來的那條鏈路 |
+| available_links | 這顆衛星目前可用的鏈路 |
+
+步驟（每收到一個封包）：
+1. 把 $pkt_{dst}$ 的 protection flag 設為 true。
+2. 若 available_links 扣掉 in_link 之後是空的（只剩進來那條路，dead end）→ 執行 loop avoidance，回傳 NULL（不轉送）。
+3. 否則，在相鄰節點中選 distance(n, dst) 最小的 n 當 out_link 轉送。
+
+**Loop avoidance**：只剩一條可用鏈路的衛星（dead end）會通知鄰居，鄰居就暫時不往它送，避免封包在死路上來回。
+
+#### (c) 運作流程
+1. 平時：protection flag = false，照 basic routing 預先算好的表轉送；換手時按時間表切換。
+2. 突發故障發生：受影響的節點立刻把 flag 設為 true，用 LGPR 在本地繞過。
+3. **同時**：把 $f^{burst}$ 加進 $\hat F$，basic routing 重新解 P2。
+4. 新的路由算好後：切回 basic routing（flag = false）。
+
+### 3.3 白話版：GPS 導航比喻
+1. **假裝地圖永遠不變（TSM）**：每顆衛星配一個「虛擬地面站」，代表「此刻地面上連到我的人」，所以地面站怎麼換手，這條連線都一直在。某條鏈路突然斷了，就當作「這條路被假流量塞滿」，別人自然不會走。
+2. **事先規劃最佳路線（basic routing）**：在這張固定地圖上，用最佳化求解器算出「不爆量、不太慢、最忙的鏈路盡量閒」的路徑；換手可預測，所以能事先算好、按時切換。
+3. **突發故障時先繞路、再重新規劃（LGPR）**：撞到斷線的衛星立刻把封包送給「離目的地最近」的鄰居；同時重新計算，算完再切回最佳路線。
+
+> **比喻**：就像開車用導航。平常照事先規劃好的路線走（步驟 2）；前方突然封路，你先轉進一條「往目的地方向比較近」的路（步驟 3，LGPR），同時導航在背景重新計算最佳路線，算好之後再照新路線走。步驟 1 的技巧，是把「封路」改記成「那條路塞滿了」，導航就永遠不用重畫地圖。
+
+### 3.4 哪些鏈路會斷？
+- **可預測故障 = GSL（地面↔衛星）**：衛星飛過頭頂，地面站必須換手到下一顆衛星（每幾十秒一次），這部分由 virtual terrestrial node 吸收。
+- **ISL（衛星↔衛星）在本文被假設為穩定**：Walker Delta 同一 shell 內相鄰衛星的相對位置固定，所以 +Grid 的 4 條 ISL 不會規律地斷開（這和 OPSPF 不同，OPSPF 的 polar orbit 在極區會規律地斷 inter-plane ISL）。
+- **突發故障 = 任何鏈路都可能**（ISL 或 GSL，node failure 則是它的所有鏈路一起失效）。論文的例子（Fig. 3 的 S1–S2、Fig. 4 的 S12–S22）都是 ISL 突然故障，LGPR 也是在太空中沿著 ISL 繞路。
+
+### 3.5 完整故事：台北 → LA 看影片
+> 以論文的設定（Starlink 第一 shell，1584 顆）為背景，時間細節為說明用的假設。
+
+**情境**：台北的使用者看 LA 伺服器上的影片。路徑是：台北地面站 → 衛星 A → 跨太平洋的多條 ISL → 衛星 Z → LA 地面站。
+
+**問題 1：可預測的換手太頻繁**
+- t = 0 s 台北站連 A；t = 30 s A 飛走，換成 B；t = 60 s 換成 C。LA 那邊也每幾十秒換一次。
+- 地面站本身沒有移動，是「服務它的衛星」一直在換。對網路來說，「台北在哪裡」指的是「台北連在哪顆衛星底下」：30 s 前是「A 底下」，30 s 後變成「B 底下」。
+- **用 OSPF**：換手後，其他衛星的 routing table 還寫著「要到台北，送給 A」，封包被送到 A，但 A 已經不連台北了，封包就被丟掉。要等 A 偵測到斷線、flood 全網、大家重算之後才恢復，每次約 7.4 s（Table I）。全網一直有人在換手，網路永遠在收斂，可達性只有約 55%。
+  - 比喻：你站在路邊靠計程車收包裹。計程車 A 開過來，你從它那裡拿包裹；A 開走後換計程車 B。你沒有動，但寄件人還把包裹交給 A，就送不到你手上。
+- **用 proactive / snapshot**：換手可預測，可以每個 snapshot 先算一張表；但若也要防突發故障，得把「每個 snapshot × 可能斷的鏈路組合」全部預算，3000 多條鏈路根本算不完。
+
+**問題 2：突發故障**
+- t = 45 s，地磁暴打壞太平洋上空的衛星 M（論文引用真實事件：一次毀掉 40 顆 Starlink），而路徑剛好經過 M。
+- OSPF 又要收斂幾十秒（10–30% 故障時 35–150 s）；snapshot 若沒預算「M 壞掉」這種情況，就派不上用場。
+
+**STARCURE 的解法（依時間順序）**
+
+出發前（離線準備）：
+1. **固定地圖（TSM）**：每顆衛星配一個虛擬地面站 vs_A、vs_B、vs_C、vs_Z……地圖永遠是「1584 顆衛星＋1584 個虛擬地面站」，不會變。
+2. **把換手變成時間表**：由軌道事先知道台北 0–30 s 在 A 底下、30–60 s 在 B 底下、60–90 s 在 C 底下，LA 一直在 Z 底下。所以「台北 → LA 一條影片流」被切成：
+   - 0–30 s：vs_A → vs_Z
+   - 30–60 s：vs_B → vs_Z
+   - 60–90 s：vs_C → vs_Z
+3. **事先算好路線**：在固定地圖上用 Gurobi 算出每個時槽的路徑（不爆量、不太慢、最忙的鏈路盡量閒），存成時間表。
+
+運作中：
+
+4. **t = 30 s 換手 A → B**：衛星照時間表切到 30–60 s 的路線，台北的封包改從 B 上去，LA → 台北的封包也改送到 B。**不用偵測、不用 flood，也不會送錯**（論文為 0.6 s）。
+5. **t = 45 s 衛星 M 被毀**：
+   - M 前一顆衛星發現往 M 的鏈路斷了，立刻把封包的 protection flag 設為 true，轉給**離 LA 最近**的鄰居，繞過 M（約 1 s）。
+   - 因為平常流量就已經分散，接手繞路流量的鏈路還有餘裕，不會塞車。
+   - 同時，把「M 的鏈路被假流量塞滿」加進模型，重新計算 45 s 之後的路線；算好後切回新的最佳路線（自然會避開 M）。
+6. **t = 60 s 換手 B → C**：和第 4 步一樣，按時切換（時間表已經更新成避開 M 的版本）。
+
+**結果**：整個過程中台北使用者的影片幾乎不會卡，可達性接近 100%，恢復後的吞吐量比其他方法高最多 197%。可預測的換手事先準備、按時切換；突發故障先緊急繞路、再重新規劃。
 
 ## 4. Implementation & Evaluation Setup
 - **Prototype**：Linux；basic routing 用 Gurobi 計算，再透過 Linux `route` 寫入 data plane；LGPR 用 Geopy 算距離；protection flag 放在 IPv6 HBH header。
