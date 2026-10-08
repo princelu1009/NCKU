@@ -207,7 +207,7 @@ $$
 #### (c) 運作流程
 1. 平時：protection flag = false，照 basic routing 預先算好的表轉送；換手時按時間表切換。
 2. 突發故障發生：受影響的節點立刻把 flag 設為 true，用 LGPR 在本地繞過。
-3. **同時**：把 $f^{burst}$ 加進 $\hat F$，basic routing 重新解 P2。
+3. **同時**：把 $f^{burst}$ 加進 $\hat F$，basic routing 重新解 P2。ㄋㄟˉ
 4. 新的路由算好後：切回 basic routing（flag = false）。
 
 ### 3.3 白話版：GPS 導航比喻
