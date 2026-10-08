@@ -43,3 +43,5 @@ tags: [LEO, ISL, topology-design, ASPL]
 ## 與其他筆記的關聯
 * 本文只看 ASPL（hop 數），不考慮容量與鏈路變動；[[Time-_Dependent_Network_Topology_Optimization_for_LEO_Satellite_Constellations]]（DoTD）則把延遲、容量和換線次數一起納入，可作為補充。
 * Slanted grid 保留 intra-orbit ISL、只改 inter-orbit 的偏移量，仍保有 [[Stable_Hierarchical_Routing_for_Operational_LEO_Networks]]（SHORT）所依賴的 $(\Delta\alpha,\Delta\gamma)$ 規則結構；非對稱的 random 拓樸則會失去這個結構。
+
+<!-- 幹 -->
