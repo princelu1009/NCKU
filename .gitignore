@@ -1,10 +1,4 @@
-# Only track paper notes; ignore Obsidian/plugin settings, PDFs and scratch files
-/*
-!/.gitignore
-!/*.md
-!/*/
-/.obsidian/
-/leo satellite paper/
+# Only track paper notes (*.md, any folder); ignore Obsidian settings, PDFs and scratch files
 *
 !*/
 !*.md
