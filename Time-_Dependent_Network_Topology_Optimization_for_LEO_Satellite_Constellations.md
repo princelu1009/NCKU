@@ -23,7 +23,7 @@ tags: [LEO, ISL, topology-design, dynamic-topology, Starlink]
 5. **需要快速、可事先算好的方法**（這一點是我們的解讀，論文沒有這樣說）：論文把問題寫成 P1 後，直接宣稱 DoTD 以多項式時間「解出」P1，並沒有討論 P1 難不難解。我們的看法是：若要把多個時槽一起最佳化，在上千顆衛星的規模下求精確解不切實際，所以 DoTD 這種逐時槽、可事先算好的貪婪方法才有實用價值；但它是近似解，不是論文宣稱的最佳解。
 
 ## 一段話總結（整合討論）
-這篇論文要解決的是 Starlink 的拓樸設計問題：每顆衛星只有 4 個雷射埠，該連哪幾顆衛星？過去的方法各有不足：+Grid 這類方法固定連「同軌道前後 + 相鄰軌道左右」的鄰居，規則固定、理論上很穩定，但真實星座不規則，鄰居不一定是好的對象；另一類方法（論文引用的 [22]、[24]、[25]）依連線表現來挑選，但只看每個時槽當下的表現，沒有考慮衛星移動帶來的時間變化。論文的 Greedy 基準就代表這種「只看當下」的做法：每個時槽只挑當下分數 A 最高（通常偏向較近）的衛星。因此作者提出 P1：在每個時槽同時最大化容量、最小化延遲，並獎勵沿用上一個時槽的連線；DoTD 再把它套用到約 10 分鐘的時間範圍。論文直接宣稱 DoTD 以多項式時間「解出」P1，並沒有討論 P1 難不難解。我們的解讀是：單一時槽的 P1（上一輪連線已知）是度數受限的配對問題，理論上可以在多項式時間內精確求解，但 907 顆衛星最多約有 41 萬個候選配對，每秒都要解一次很吃力；若要真正最佳化整段時間，「保留上一輪連線」的獎勵又把各時槽綁在一起，把問題延伸到時間維度，求解更加困難。DoTD 的做法是：每個時槽貪婪地挑出分數最高的連線（論文稱它以動態規劃為基礎），決定後就往下一個時槽前進，不再回頭修改。相較於 +Grid，它能隨衛星移動動態調整連線；相較於 Greedy（只用 A，其中只含上一輪連線的小額加分），它以 α = A + Π_j 排序，多了候選衛星 j 的累積歷史分數 Π_j，讓過去連線表現良好的衛星更容易被選中，因此連線更穩定。需要注意幾點：第一，論文把 DoTD 勝過 Greedy 歸功於「預估未來的連線表現」，但演算法其實只用到當下與上一個時槽的資訊，Π_j 是我們從公式看出的實際差別。第二，Π_j 屬於衛星 j 本身而非某一對連線，只反映「過去表現好」而非「未來會留在附近」，而且不會衰減（論文的 Lemma III.2 宣稱 Π 有界，但證明不成立）。第三，論文宣稱 DoTD 達到最佳，但它是貪婪方法，未必是最佳解；論文也只用實驗顯示 DoTD 優於 Greedy 和 +Grid，並沒有和 P1 的精確最佳解比較。
+這篇論文要解決的是 Starlink 的拓樸設計問題：每顆衛星只有 4 個雷射埠，該連哪幾顆衛星？過去的方法各有不足：+Grid 這類方法固定連「同軌道前後 + 相鄰軌道左右」的鄰居，規則固定、理論上很穩定，但真實星座不規則，鄰居不一定是好的對象；另一類方法（論文引用的 [22]、[24]、[25]）依連線表現來挑選，但只看每個時槽當下的表現，沒有考慮衛星移動帶來的時間變化。論文的 Greedy 基準就代表這種「只看當下」的做法：每個時槽只挑當下分數 A 最高（通常偏向較近）的衛星。因此作者提出 P1：在每個時槽同時最大化容量、最小化延遲，並獎勵沿用上一個時槽的連線；DoTD 再把它套用到約 10 分鐘的時間範圍。論文直接宣稱 DoTD 以多項式時間「解出」P1，並沒有討論 P1 難不難解。我們的解讀是：單一時槽的 P1（上一輪連線已知）是度數受限的配對問題，理論上可以在多項式時間內精確求解，但 907 顆衛星最多約有 41 萬個候選配對，每秒都要解一次很吃力；若要真正最佳化整段時間，「保留上一輪連線」的獎勵又把各時槽綁在一起，把問題延伸到時間維度，求解更加困難。DoTD 的做法是：每個時槽貪婪地挑出分數最高的連線（論文稱它以動態規劃為基礎），決定後就往下一個時槽前進，不再回頭修改。相較於 +Grid，它能隨衛星移動動態調整連線；相較於 Greedy（只用 A，其中只含上一輪連線的小額加分），它以 α = A + Π_j 排序，多了候選衛星 j 的累積歷史分數 Π_j，讓過去連線表現良好的衛星更容易被選中，因此連線更穩定。需要注意幾點：第一，論文把 DoTD 勝過 Greedy 歸功於「預估未來的連線表現」，但演算法其實只用到當下與上一個時槽的資訊，Π_j 是我們從公式看出的實際差別。論文中的「未來」只出現在 DTEG：用預測的軌道事先建好未來約 10 分鐘的各層；DoTD 逐層往前選，每一層只看當下和過去，作者公開的程式碼也證實沒有往後看。第二，Π_j 屬於衛星 j 本身而非某一對連線，只反映「過去表現好」而非「未來會留在附近」，而且不會衰減（論文的 Lemma III.2 宣稱 Π 有界，但證明不成立）。第三，論文宣稱 DoTD 達到最佳，但它是貪婪方法，未必是最佳解；論文也只用實驗顯示 DoTD 優於 Greedy 和 +Grid，並沒有和 P1 的精確最佳解比較。
 
 ## Method at a glance
 The main equations (P1, Eq. 1, 5, 8, 9, 11–17) are explained once, in the **DoTD 公式詳解** section at the end.
@@ -109,11 +109,11 @@ Each GS attaches to the visible satellite with the lowest $\tau + 1/C$ (Eq. 5).
 
 ## Critique
 Detailed derivations are in 公式詳解; this is the list.
-* **Latency formula inverted (confirmed)**: printed as $L = c/D$ (and $\tau = c/d$); should be $D/c$. Taken literally, the score would favour long links (my inference; the code may do D/c correctly). See Eq. 9.
+* **Latency formula inverted (confirmed)**: printed as $L = c/D$ (and $\tau = c/d$); should be $D/c$. Taken literally, the score would favour long links. The released code computes D/c, so this is a typo (see Eq. 9 and Code vs paper).
 * **Π boundedness proof fails (confirmed)**: each unrolled level of Eq. 17 adds about 1, so Π grows roughly linearly in time and eventually outweighs A. See §5.
 * **Π ignores the evaluating satellite**: everyone adds the same $\Pi_j$, so all satellites are pulled toward the same popular nodes. See Eq. 14.
 * **Optimality claim unproven (confirmed)**: the paper says DoTD "consistently achieves optimal performance", but it is a greedy heuristic with no proof.
-* **Eq. 15 printed as argmin**, though the text and example pick the highest score.
+* **Eq. 15 printed as argmin**, though the text and example pick the highest score. The released code uses argmax.
 * **Hop-count percentages miscalculated (confirmed from Fig. 5a)**: DoTD needs 2/3/4/5/6 hops (sum 20), Greedy 6/6/6/6/8 (sum 32) and +Grid 22 in every scenario (sum 110). The claimed 10.91% equals (32−20)/110, dividing by +Grid's total; the real reduction vs Greedy is (32−20)/32 = 37.5%. The "up to 81.82%" vs +Grid is (110−20)/110, which is the average, not the best case (S1: 90.9%).
 * **Capacity gains use DoTD as the base**: reading Fig. 5c approximately, DoTD ≈ 0.202 Gb/s summed over S1–S5, Greedy ≈ 0.144 and +Grid ≈ 0.060. (DoTD−Greedy)/DoTD ≈ 28.7% and (DoTD−Grid)/DoTD ≈ 70.3% match the claimed 28.09% and 70.47%. As true increases they are about +40% vs Greedy and +237% vs +Grid.
 * **+Grid is identical in all five scenarios**: 22 hops, 203.6 ms and about 12 Mb/s per link, from Sydney–Darwin to New York–San Francisco. That is implausible for routes this different.
@@ -123,9 +123,24 @@ Detailed derivations are in 公式詳解; this is the list.
 * **Update interval is contradictory**: Section III says Algorithm 1 updates the topology every T (about 10 min) because sub-second reconfiguration is impractical, yet it also picks links for every τ ≈ 1 s slot, and Fig. 6 counts changes between consecutive time steps. This note follows the per-slot reading.
 * **Eq. 1 mislabelled**: the paper calls $\theta_{max}$ the maximum elevation angle, but the formula gives an Earth-centred angle (see 公式詳解 §2).
 * **Modelling**: capacity is interference-free with fixed power; ISLs are described as optical, yet capacity uses a 12.2 GHz RF link budget; links are spatial only; orbit prediction is assumed accurate. The RF model gives only about 38 Mb/s per DoTD link (Fig. 5c), far below real optical ISLs.
-* **Evaluation**: only 2 baselines, 907 satellites, 5 GS pairs and one date; the churn window is misstated (see Main Results); the abstract calls the emulator "Mininet-based", but the body only names xeoverse (presumably the same tool).
+* **Evaluation**: only 2 baselines, 907 satellites, 5 GS pairs and one date; the churn window is misstated (see Main Results); the abstract calls the emulator "Mininet-based", but the body only names xeoverse. The Mininet part is probably the authors' SpaceNetPhase2 emulator (see Code vs paper).
 * **Reproducibility**: transmit power, noise power and shell altitudes/inclinations are not reported, so capacity can't be reproduced from the paper alone.
 * Future work stated by the authors: hierarchical routing, OSPF weights, GS placement, CDNs.
+
+## Code vs paper (checked 12 Oct 2026)
+The paper's code link is [FarzadMehri/SpaceNet](https://github.com/FarzadMehri/SpaceNet) (commit e46042e). DoTD is the `DOTD` option of `mininet_add_ISLs` in `mobility/mobility_utils.py`, with its state in `mobility/DoTD.py`. The repo looks like a copy of SpaceNetPhase1 from the authors' [SpaceNetTestbed-public](https://github.com/orgs/SpaceNetTestbed-public/repositories) with a DoTD option added. SpaceNetPhase1 and SpaceNetPhase2 themselves contain no DoTD or Greedy code, including in their commit history. The paper says MATLAB computed S and L, so this Python code is probably not exactly what produced the figures.
+
+* **Otherwise follows Section III-B**: the `DOTD` branch implements Eq. 11 (normalise by S_max, L_max and U = 4), Eq. 12 (running max), the form of Eq. 13, Eq. 14 (α = A + the partner's $\Pi_{j,t-1}$), the selection described for Eq. 15 (highest score, both ends below U ports) and duplex links ($\phi^*_{j,i} = \phi^*_{i,j}$). The mismatches are listed below.
+* **No look-ahead**: `main.py` steps through time, and each step uses only the current positions plus φ and Π saved from the previous step. There is no 10-minute window and no use of later steps. This confirms the "Looks into the future" point in Critique: the future exists only in the DTEG (positions predicted in advance), not in DoTD's choices.
+* **Can't run as released**: the `DOTD` branch calls `calculate_link_characteristics_for_gsls_isls` with 3 arguments, but the function takes 5, so Python would stop with an error at the first step.
+* **Weights**: w1 = w2 = 0 (so w3 = 1) instead of 0.4. Capacity and latency would be ignored, and at the first step every score is 0, so no links would be chosen at all.
+* **Π update**: each satellite adds its own previous Π, not its partner's $\Pi_{j,t-1}$ as Eq. 16 says (the PDF clearly prints $\Pi_{j,t-1}$, and Eq. 17 also chains through partners). It looks like a one-index slip: the score on line 356 uses `PI_i_t[:, t-1]` (partner), but the update on line 379 uses `PI_i_t[k, t-1]` (own). With all 4 ports used, Π still grows by about one link score per step, so it is still unbounded.
+* **Selection**: one global loop repeatedly takes the highest-scoring pair (argmax) while both ends have a free port. This confirms that Eq. 15's argmin is a typo.
+* **Latency**: computed as D/c in ms, so Eq. 9's c/D is a typo.
+* **Link model**: the link function gives every ISL the same fixed throughput (500) instead of Shannon capacity (Eq. 8). The range limit is 10,000 km, not 7,000 km, and the DoTD branch has no atmosphere check (C3).
+* **Routing**: a shortest-path search (Floyd–Warshall) weighted by latency, recomputed every step. The template config attaches ground stations by distance only, not by Eq. 5.
+* **Baselines**: there is no Greedy implementation. +Grid, xGrid (`CROSS_GRID`) and Motif are there.
+* **Emulator**: SpaceNetPhase2 is a Mininet emulator, which is probably the "Mininet-based" tool the abstract mentions.
 
 ## 與其他筆記的關聯
 * [[LAMP_Low-Latency_Dynamic_Topology_for_LEO_Satellite_Constellations]] 同為動態拓樸，但只動第 4 條鏈路並建模 slew 成本；DoTD 完全沒考慮 slew 時間。
