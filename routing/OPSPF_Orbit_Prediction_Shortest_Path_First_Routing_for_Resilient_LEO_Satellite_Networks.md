@@ -17,7 +17,7 @@ LEO 衛星網路的 ISL 會規律地斷線、重連（例如進入極區時）�
 - 衛星之間直接通訊的鏈路，現代多用雷射，不必經過地面站轉送。沒有 ISL 時資料只能「上去再下來」（bent-pipe），海洋或偏遠地區難以覆蓋。
 - **Intra-plane ISL**：連同一軌道上前後兩顆衛星，相對位置固定，很穩定。
 - **Inter-plane ISL**：連相鄰軌道上的衛星，距離和角度一直變，是拓樸變化的主因。
-- 一般每顆衛星有 4 條（2 intra＋2 inter），形成 +Grid。
+- 一般每顆衛星有 4 條 ISL（2 intra＋2 inter），形成 +Grid。本文的衛星有 **4+1 個 interface**：4 條 ISL，再加 1 個對地 interface。
 - 「連哪顆衛星」屬於拓樸設計（DoTD、LAMP、Minimum-hop）；「封包走哪條鏈路」屬於路由（OPSPF、StableRoute、SHORT）。
 
 ### OSPF（Open Shortest Path First）
@@ -28,11 +28,13 @@ LEO 衛星網路的 ISL 會規律地斷線、重連（例如進入極區時）�
 4. **SPF**：各自用 Dijkstra 算出 routing table。
 
 ### 為什麼極區（緯度 > 70°）的 inter-plane ISL 會斷
+> 論文原文只有一句：衛星進入 polar region 後，因 antenna tracking 限制，它**朝向更高緯度衛星的那條 inter-plane ISL** 會斷開；intra-plane ISL 一直保持連線。以下的 slew rate、cos(緯度) 和比喻是背景補充，不是論文內容。
+
 - **Antenna tracking（天線追蹤）**：雷射光束極細，傳幾千公里後光點只有幾十公尺寬；兩顆衛星又都以約 7.5 km/s 移動，所以終端必須不斷轉動才能一直對準對方。轉動速度的上限稱為 **slew rate**。
 - **Polar orbit 就像地球儀上的經線**：在赤道，相鄰軌道離得最遠且幾乎平行；越往北越靠近，到 90° 全部交會。相鄰軌道的距離大約和 cos(緯度) 成正比，70° 時只剩赤道的約三分之一，而且越往上縮得越快。
-- 越靠近極點，鄰居方向變化越劇烈，過極點時還會左右互換，天線轉不過來，鏈路就斷。所以設計上在 |緯度| > 70° 時主動關閉 inter-plane ISL；intra-plane ISL 則不受影響。
+- 越靠近極點，鄰居方向變化越劇烈，過極點時還會左右互換，天線轉不過來，鏈路就斷。所以衛星進入極區（|緯度| > 70°）後，朝更高緯度方向的 inter-plane ISL 會斷開；intra-plane ISL 則不受影響。
 - **比喻**：兩人在跑道上跑，你拿雷射筆照著朋友胸前硬幣大小的靶。並肩跑（赤道）時手幾乎不用動；跑道像 X 一樣交叉（極區）時，朋友一兩秒內從右前方跑到左後方，手甩不過來，雷射就照偏了。
-- 70° 不是物理定律，是本文依天線追蹤能力選定的邊界值。因為只取決於緯度，所以**完全可預測**，這正是 OPSPF 能把它當成「規律變化」處理的原因。
+- 70° 不是物理定律。論文只寫 polar region boundary「設為 ±70°」（Table I），沒有說明怎麼選的。因為只取決於緯度，所以**完全可預測**，這正是 OPSPF 能把它當成「規律變化」處理的原因。
 
 ## 1. Problem & Motivation
 - LEO topology 週期性變化：衛星進入 polar region 後，因 antenna tracking 限制，inter-plane ISL 斷開。
@@ -61,7 +63,7 @@ LEO 衛星網路的 ISL 會規律地斷線、重連（例如進入極區時）�
 ## 3. Method
 四個部分的分工：static module 處理可預測的變化，dynamic module 處理突發故障，兩者寫入同一張 routing table。
 
-**3.1 Static workflow（每秒跑一次）**：Geo data（GPS）→ 計算所有衛星位置 → 與 polar boundary（±70°）比對，把極區內的 inter-plane ISL 標記為斷 → 更新 LSDB → SPF（Dijkstra）→ routing table。這就是「即時計算」的部分。
+**3.1 Static workflow（每秒跑一次）**：Geo data（GPS）→ 計算所有衛星位置 → 與 polar boundary（±70°）比對，把進入極區的衛星朝高緯度方向的 inter-plane ISL 標記為斷 → 更新 LSDB → SPF（Dijkstra）→ routing table。這就是「即時計算」的部分。
 
 **3.2 Orbit prediction（從自己的位置推出所有人的位置）**：$M$ 個 orbit、每 orbit $N$ 顆，等間距排列；local 為 $S(x,y)$；$d=\pm1$ 代表運動方向（北行／南行）。$c_0=360/N$，$c_1$ = 相鄰 orbit 的 latitude 相位差，$c_2=180/M$。
 - 換 orbit：$S(i,y).\lambda=(S(i-1,y).\lambda+c_2+180)\bmod 360-180$，$S(i,y).\varphi=S(i-1,y).\varphi+c_1d$。白話：經度加 $180/M$（polar orbit 只需涵蓋 180° 經度），緯度加上相位差。
@@ -126,7 +128,7 @@ LEO 衛星網路的 ISL 會規律地斷線、重連（例如進入極區時）�
 - Polar region 內的 failure 要等離開後才偵測到。
 
 **我的質疑（inference）**
-- 預測模型是理想化 polar 幾何（等間距、圓軌道、無 Earth rotation 與 J2），也沒處理 seam 反向 orbit；能否推廣到 Starlink 這類 inclined、多 shell 星座存疑。
+- 預測模型是理想化 polar 幾何（等間距、圓軌道、無 Earth rotation 與 J2），也沒特別處理 seam（Fig. 1 有畫出北行和南行的 orbit，但預測和斷線規則沒區分 seam 兩側反向 orbit 之間的 ISL）；能否推廣到 Starlink 這類 inclined、多 shell 星座存疑。
 - 只有 48 顆，baseline 只有 OSPF，沒和 snapshot-based 方法比 memory 或 latency。
 - 每 1s 全網 Dijkstra 在數千顆規模的 CPU 成本與 route flapping 沒評估。
 - Link cost 為靜態值，未考慮 congestion 或 load balancing。
