@@ -21,6 +21,27 @@ StableRoute 沒有換掉 Dijkstra，只是讓它在不必換路的時候就不�
     * **SR_G** uses the predictable orbits to plan a whole cycle of next-hop choices with the fewest changes.
 * In emulation, all three cut route updates by roughly 43–46% on a 40×40 constellation compared with plain Dijkstra.
 
+## 背景：星座類型與模擬工具
+### Walker Star 和 Walker Delta（§II-A）
+* **傾角（inclination）**：軌道平面和赤道的夾角。0° 是沿著赤道繞，90° 是正好經過南北極（polar orbit，極軌道）。
+* **Walker 星座**：一種「平均擺放」衛星的標準設計，所有軌道高度、傾角都一樣，每條軌道上的衛星等間距。論文的 **N×N** 就是 N 條軌道、每條 N 顆。
+* **Walker Star**（論文例子：OneWeb，87.9°）：
+    * 傾角接近 90°，各軌道平面只分散在 180° 經度內。
+    * 比喻：像**地球儀上的經線**，所有軌道在**極區交會**。
+    * 有一條 **seam（縫）**：第一條和最後一條軌道並排，但一條往北、一條往南飛，通常不連 ISL。
+    * 本文主要實驗（4×4～40×40）都用這種，OPSPF 的 LEO-48 也是這一類。
+* **Walker Delta**（論文例子：Starlink，53°）：
+    * 傾角較小，各軌道平面分散在完整 360° 經度。
+    * 比喻：像**毛線球上斜斜纏繞的毛線**，軌道在**中緯度交會**。
+    * 本文只測一組 20×20（Fig. 12）。
+* **為什麼要分兩種**：ISL 是在「靠近軌道交會點」時斷（Fig. 1），交會點位置不同，斷線的地點和模式就不同。論文說 Walker Star 結構比較簡單，所以 SR_L（只看局部）和 SR_G（看全局）表現接近；Walker Delta 結構較複雜，SR_G 的全局優勢才明顯（46.93% vs SR_L 34.24%）。
+
+### STK、SPP、SNG（實驗用的工具鏈，§V-A）
+* **STK（Systems Tool Kit）**：AGI（現屬 Ansys）出的商用衛星軌道模擬軟體，輸入軌道參數就算出**每顆衛星在每個時間點的位置**和 ISL 資訊。比喻：它是「天文台」，只告訴你衛星在哪，不管網路。
+* **SPP（Satellite Position Parser）**：作者自己寫的程式，讀 STK 的輸出，整理成「什麼時候哪條 ISL 存在」。
+* **SNG（Satellite Network Generator）**：作者基於 **Mininet** 寫的工具。Mininet 是開源工具，能在一台 Linux 電腦上建出很多虛擬節點和鏈路，跑**真實的協定程式碼**。SNG 用它建出虛擬衛星網路，並依照 SPP 的資料開關鏈路。
+* **流程**：STK 算軌道 → SPP 轉成鏈路開關時間表 → SNG 在 Mininet 上建網路、跑路由。OPSPF 用的是同樣的 STK，但網路部分用 Exata。
+
 ## 背景：TCP 為什麼怕換路
 * **TCP** 是網路上最常用的傳輸協定（網頁、檔案下載都靠它），負責讓資料完整、照順序送到：資料切成很多編號的小封包，接收端每收到一個就回報「收到第幾號了」。
 * 如果後送的封包比前面的先到，接收端會一直重複回報「還在等第 N 號」（duplicate ACK）。傳送端看到重複回報，會以為封包掉了，於是**重傳**（Fast Retransmit），並把傳送速度**降下來**。
@@ -37,6 +58,11 @@ StableRoute 沒有換掉 Dijkstra，只是讓它在不必換路的時候就不�
 
 ## System Model
 * Each satellite has 4 ISLs: 2 intra-orbit and 2 inter-orbit. All ISL weights are 1, so path cost = hop count.
+* **拓樸怎麼變（§II-A、Fig. 1）**：
+    * 沒有固定的 70° 門檻；衛星**靠近軌道交會點**時，pointing／acquisition／tracking 跟不上，inter-orbit ISL 斷掉。Walker Star 的交會點在極區，Walker Delta 在中緯度。
+    * 一個和 OPSPF 不同的細節：靠近交會點時 s1.b–s2.a 斷，**離開後接上的是 s1.a–s2.b**，也就是換了配對對象，不是原本那條接回來。
+    * 實際哪條什麼時候斷／連，由 STK 產生的資料決定（經 SPP 解析）；論文沒給高度和門檻角度。
+    * 一個軌道週期被切成 **m 個 snapshot**，每次 ISL 斷或連就是一個事件。SR_L／SR_K 只看當下這張，SR_G 一次看整個週期。
 * A route update happens for one of three reasons:
     * **S1**: an ISL on the current path goes down. The current update cannot be avoided, but with a global view of the predictable orbits the number of such updates can be reduced (targeted by SR_G).
     * **S2**: Dijkstra's default tie-breaking picks a different equal-cost path (avoidable, targeted by SR_L).
@@ -83,6 +109,30 @@ Next-hop set O(n²) (set size ≤ 4); CountLength O(n) over n − 1 targets; SR_
 * SR_L ≈ SR_G in Walker Star, but SR_G pulls clearly ahead in Walker Delta.
 * **TCP case studies** (single flow): Dijkstra's switches cause 1240 retransmissions when moving to a congested path, 2271 when moving to a higher-bandwidth path (reordering), and 457 when moving to a 1-hop-shorter path. SR_L / SR_G avoid the first two; SR_K avoids the third.
 
+## 重現實驗（簡化版，2026-10）
+自己寫 Python 模擬重做「換路次數」實驗（Fig. 8–11），程式和圖在 project files 的 `notes/stableroute/sim/`。
+* **假設**（論文沒給的部分自己定）：N×N Walker Star、傾角 87.9°、高度 1200 km；任一端 |緯度| > 70° 就斷 inter-orbit ISL，出來後**同一條**接回；seam 兩側不連；權重全為 1；Dijkstra 平手時選編號最小的前驅。
+* **結果**（相對 Dijkstra 減少的換路次數）：
+
+| | SR_L | SR_K (k=2) | SR_G |
+|---|---|---|---|
+| 論文 4×4 | 9.86% | 14.25% | 11.60% |
+| 重現 4×4 | 38% | 53% | 41% |
+| 論文 40×40 | 43.40% | 44.97% | 45.86% |
+| 重現 36×36 | 53% | 54% | 57% |
+| 重現 40×40 | 33% | 34% | 38% |
+
+* **和論文一致**：
+    * 除了最小的星座，排名都是 SR_G > SR_K ≥ SR_L。
+    * ISL-down 事件時 SR_L／SR_K 常比 Dijkstra 換得**更多**（負的 gain），SR_G 則大幅減少（約 −46～−75%）。
+    * ISL-up 事件時 SR_K 幾乎不換（減少 85～100%）。
+    * Scenario 比例 S1 約 42–50%、S2 約 22–37%，接近論文的 42.7%／31.9%。
+* **和論文不同**：
+    * 數字整體偏高，小星座差最多。
+    * 曲線會跳：N = 10–13、20、22、28、40 的改善特別低，是衛星同時越過 70° 的時間點排列不同造成的。
+    * 權重全為 1 時網格是二分圖，路徑長度差只會是偶數，所以 S3「短 1 hop」幾乎是 0、全落在「短 2 hop」；論文 S3 k=1 平均 18%。
+    * 可能原因：論文用 STK 實際資料，而且離開交會點後**換配對對象**；我的模擬是同一條鏈路關掉再接回。
+
 ## Limitations
 * Stated by the authors:
     * SR_L and SR_K are only locally optimal: avoiding an update now can cause more later.
@@ -103,6 +153,17 @@ Next-hop set O(n²) (set size ≤ 4); CountLength O(n) over n − 1 targets; SR_
     * **StableRoute 解決「重算後選哪條」**：論文 §II-B 明講 OPSPF 這類 calculation-based 方法仍會因換路造成封包亂序，所以 StableRoute 改的是 Dijkstra 本身，不是重算的時機。
     * 兩者可以疊加（inference）：把 OPSPF static module 裡的 SPF 換成 SR_L/SR_K 即可。分工也很像：SR_G 對應 OPSPF 的「可預測變化用預測處理」，SR_L 對應「突發變化用本地資訊處理」。
     * 也因為 OPSPF 底層同樣是 Dijkstra，StableRoute 的實驗只拿 Dijkstra 當 baseline，沒有另外和 OPSPF 比。
+    * **接點**：OPSPF Fig. 2 最後一格 *Shortest path first algorithm* 就是普通 Dijkstra，StableRoute 等於把這一格換掉。
+    * **玩具例子**（四顆衛星 A–B／C–D 為 inter-plane，A 要送到 D，一開始走 A→C→D）：
+
+| 時間 | 事件 | OPSPF（普通 Dijkstra） | 換成 StableRoute |
+|---|---|---|---|
+| 10 s | C–D 壞了 | 必須改走 A→B→D | 一樣必須換（S1） |
+| 20 s | C–D 修好 | 兩條一樣短，可能換回 A→C→D | SR_L：現在這條仍是最短，不換（S2） |
+| 30 s | A 進極區，A–B 斷 | 若 20 s 沒換回就得換 | SR_G 事先知道 A–B 會斷，20 s 時就選撐得比較久的路 |
+
+* 同樣的變化，OPSPF 可能換路 2–3 次，StableRoute 盡量壓到 1 次。
+* 兩者衡量的東西也不同：OPSPF 看**控制封包數和收斂時間**（地圖更新得省不省、快不快），StableRoute 看**換路次數和 TCP 重傳**（路線穩不穩）。
 * 與 [[Stable_Hierarchical_Routing_for_Operational_LEO_Networks]]（SHORT）目標相同，都是要減少路由更新，但做法不同：SHORT 用座標不變量取代 Dijkstra；StableRoute 保留 Dijkstra，只改 tie-breaking 和「容忍稍長路徑」。
 * [[Time-_Dependent_Network_Topology_Optimization_for_LEO_Satellite_Constellations]]（DoTD）在拓樸層減少換線，StableRoute 在路由層減少換路，兩者可以疊加。
 * [[Minimum-hop Constellation Design for LEO Satellite Networks]] 的 slanted grid 會改變 equal-cost path 的數量，進而影響 S2 的比例。
