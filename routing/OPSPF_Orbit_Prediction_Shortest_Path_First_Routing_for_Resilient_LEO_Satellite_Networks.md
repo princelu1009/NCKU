@@ -10,10 +10,22 @@ tags: [LEO, satellite-routing, OSPF, orbit-prediction, link-state, resilience]
 T. Pan, T. Huang, X. Li, Y. Chen, W. Xue, Y. Liu, "OPSPF: Orbit Prediction Shortest Path First Routing for Resilient LEO Satellite Networks," IEEE, 2019.
 
 ## 一句話摘要
-LEO 衛星網路的 ISL 會規律地斷線、重連（例如進入極區時）。傳統 OSPF 每次都要等偵測、全網 flood 才能收斂，太慢；snapshot-based 方法要事先存一大堆路由表，又無法處理突發故障。OPSPF 讓每顆衛星用**自己的 GPS 位置推算整個星座的拓樸**，每秒在本地重算路由，因此規律變化完全不需要 flooding；只有**突發故障**時才退回 OSPF 的 Hello/LSU 機制。在 48 顆衛星的模擬中：規律變化（極區斷線）時 OPSPF 是 **0 個控制封包、0 收斂時間**；突發故障時與 OSPF 相比，控制封包少約 57%、收斂時間少約 82%（57% 有一部分來自 OPSPF 沒有 LSAck，見 §5）。主要價值在 Walker Star 這類會穿過極區的星座；實驗只在 Exata 上跑了一種星座，論文也沒附程式碼。
+**OPSPF（Pan et al., IEEE ICC 2019）** 要解決的是 OSPF 用在極軌 LEO 星座上的問題：衛星進入極區（緯度 >70°）時，跨軌 ISL 會規律性地斷開。OSPF 不知道這是「可預期的」，只能等 Hello 逾時再全網泛洪 LSU，造成收斂延遲和封包遺失。另一種做法是快照法（snapshot），它要存大量拓撲、很吃記憶體，也處理不了突發故障。OPSPF 把路由拆成兩個模組。**靜態模組**每 1 秒由各衛星用自己的 GPS 和軌道參數推算所有衛星位置，先把極區內會斷的跨軌鏈路移除，再建 LSDB、跑 Dijkstra，得到路由表。**動態模組**保留 OSPF 的 Hello/LSU，但只在 local flag 為 OK 的介面上運作，專門偵測非預期的故障。兩個模組之間用 local flag（OK/Failure/Ineffective）和 global flag（OK/Failure）溝通，最後共用同一張路由表。作者在 Exata 5.1 + STK 上用 LEO-48（6 軌 × 8 星）實作驗證。結果是：可預期的極區鏈路變化完全不需要控制封包、收斂時間為 0（OSPF 約 543 ms、235 個封包）。對突發故障，控制封包少約 57%、收斂快約 82%（約 100 ms、101 個封包）。不過這篇也有限制：極區內的故障偵測不到，只對近極軌（Walker Star 類）星座有效，省下的封包有一部分來自拿掉 LSAck，只測了一種星座，程式碼也沒有公開。（最後一句的限制是我自己的評語，不是作者寫的。）
+
+**English:** OPSPF (Pan et al., ICC 2019) targets a weakness of OSPF in polar-orbit LEO constellations. Inter-plane ISLs break predictably when satellites enter the polar region (>70° latitude), but OSPF treats these breaks as failures, waiting for Hello timeouts and then flooding LSUs network-wide, which causes slow convergence and packet loss. Snapshot-based methods avoid this but need a lot of memory and cannot handle sudden failures. OPSPF splits routing into two modules. A static module runs every 1 s: each satellite predicts all satellite positions from its own GPS and orbital parameters, removes the polar inter-plane links, builds the LSDB and runs Dijkstra. A dynamic module keeps OSPF Hello/LSU only on interfaces whose local flag is OK, so it catches only unexpected failures. Local and global flags link the two modules, which share a single routing table. In an Exata/STK simulation of a 48-satellite (6×8) constellation, predictable topology changes needed zero control packets and zero convergence time (OSPF: about 543 ms and 235 packets). For unexpected failures, OPSPF used about 57% fewer control packets and converged about 82% faster. Limitations: failures inside the polar region go undetected, the benefit is limited to near-polar constellations, part of the saving comes from dropping LSAck, and only one constellation was tested.
 
 ## 0. 背景知識
 > 讀這篇前需要的五件事：ISL 是什麼、OSPF 怎麼運作、星座長什麼樣、為什麼極區會斷線、實驗用的工具。
+
+### 先看這裡：最常搞混的四件事（速查）
+
+| 問題               | 一句話答案                                                                              | 細節                |
+| ---------------- | ---------------------------------------------------------------------------------- | ----------------- |
+| Polar orbit 長怎樣  | 軌道像地球儀上的經線，全部在南北極交會（Walker Star）；靠近極點時跨軌 ISL 會斷                                    | §0 Walker、極區；§0.5 |
+| LSA／LSU／LSDB／路由表 | 明信片／信封／相簿（全網地圖）／指路牌                                                                | §0 OSPF           |
+| OSPF vs OPSPF    | OSPF：斷了才聽到，再全網廣播；OPSPF：該斷的自己用 GPS 算，只有意外才用 OSPF 那套                                 | §0 OSPF、§3.3、§3.7 |
+| Fig. 4           | 小算（static）寫路由表和 local flag；小聽（dynamic）讀 local flag、寫 global flag；兩個 flag 是它們傳紙條的白板 | §3.3              |
+| 整體流程圖            | OSPF、OPSPF（可預測＋不可預測）、LSA／LSU／LSAck、keepalive 的流程圖                                  | §2.5              |
 
 ### ISL（Inter-Satellite Link，衛星間鏈路）
 - 衛星之間直接通訊的鏈路，現代多用雷射。沒有 ISL 時資料只能「上去再下來」（bent-pipe），海洋或偏遠地區難以覆蓋。
@@ -36,6 +48,51 @@ LEO 衛星網路的 ISL 會規律地斷線、重連（例如進入極區時）�
 3. **LSAck（回條）**：收到 LSU 要回一張回條，沒收到回條的會重傳，確保消息不會掉。
 4. **LSDB（更新地圖）**：大家在自己的地圖上把那條路劃掉，地圖保持一致。
 5. **SPF（重新找路）**：每個人用 Dijkstra 在新地圖上重算最短路，得到路由表。
+
+**四個名詞：LSA、LSU、LSDB、路由表**
+
+| 名詞 | 比喻 | 是什麼 | 每顆衛星的都一樣嗎 |
+|---|---|---|---|
+| LSA（Link State Advertisement） | 明信片 | 一台路由器的自我介紹：「我是誰、連著誰、成本多少」，附序號 | （每張只描述一台） |
+| LSU（Link State Update） | 信封 | 真正在網路上傳的封包，裡面裝一張或多張 LSA | — |
+| LSDB（Link State Database） | 相簿＝全網地圖 | 收集每台路由器**最新**的那張 LSA，拼起來就是地圖 | 一樣 |
+| 路由表 | 路口的指路牌 | 「要去 X，交給哪個鄰居」，由 LSDB 跑 Dijkstra 算出 | 各自不同 |
+
+以下用 A–B–C–D 圖示意。成本 3、5、6 是自己編的，論文沒定義成本（見 §3.3）。
+
+```
+A ——3—— B
+|       |
+5       5
+|       |
+C ——6—— D
+```
+
+**① LSA**：A 的明信片 =「發出者 A，序號 1，鏈路：A–B 3、A–C 5」。
+
+**② LSU**（照 OSPFv2 簡化；OPSPF 論文沒寫自己的格式）：
+
+```
+OSPF 標頭：類型 4 = LSU（1 = Hello、5 = LSAck），寄件人 B
+內容：LSA 數量 1
+  └ LSA：發出者 B，序號 2，鏈路：B–A 3    ← B–D 不見了 = 斷了
+```
+
+**③ LSDB**：一台路由器一格，只放最新那張 LSA。
+- 新 LSA 來了比序號：比較大就換掉並轉傳；一樣或比較小就丟掉（就是 Fig. 7 的 *Coherence?*）。
+- 拼地圖時，一條鏈路要**兩端的 LSA 都有寫**才算數。所以只要任一端的新 LSA 先到，就能把斷掉的鏈路拿掉。
+
+**④ 路由表**（A 的）：
+
+| 目的地 | 下一跳 | 總成本 |
+|---|---|---|
+| B | B | 3 |
+| C | C | 5 |
+| D | B | 8（A→B→D） |
+
+- **一次故障怎麼傳**：B–D 壞 → B、D 各寫一張新 LSA → 裝進 LSU 送給鄰居 → 鄰居比序號、換掉舊的、重跑 Dijkstra、再轉傳 → 全網的相簿又一樣（收斂）。A 的表裡 D 改交給 C（成本 11）。
+- 這個 4 顆的例子共傳 6 個 LSU。標準 OSPF 每個還要回 LSAck，共 12 個；OPSPF 不回，只有 6 個。
+- OPSPF 的 LSDB 不是靠收集 LSA 拼出來的，見 §3.3。
 
 **直接用在衛星上的問題**：衛星每次飛進極區，某些 ISL **一定會斷**，而且每圈都重複。OSPF 每次都要等 Hello 逾時才發現（這段時間封包會掉）、再全網廣播（佔頻寬）。本文量到每次約 **543 ms、235 個控制封包**。
 
@@ -74,6 +131,7 @@ LEO 衛星網路的 ISL 會規律地斷線、重連（例如進入極區時）�
 所以設計上乾脆在進極區時**先把跨軌 ISL 關掉**，出了極區再重新連線。這件事每圈都發生、時間可預測，OPSPF 才能用軌道預測處理，不必等 Hello 逾時。
 
 ### 實驗工具：STK 和 Exata
+
 | | STK 9.2.1 | Exata 5.1 |
 |---|---|---|
 | 是什麼 | 衛星軌道模擬軟體（AGI，現屬 Ansys） | 網路**仿真器**（emulator） |
@@ -101,6 +159,7 @@ OPSPF 的拓樸是**標準的 polar 星座加上網格狀（+Grid）連線**，�
   - **2 條 inter-plane ISL**：左右相鄰軌道上的那顆。
   - **1 個對地**接口。
 - 畫出來就像棋盤格（直線＝intra-plane，橫線＝inter-plane）：
+
 ```
  orbit1  orbit2  orbit3
    ●──────●──────●
@@ -169,6 +228,164 @@ OPSPF 的拓樸是**標準的 polar 星座加上網格狀（+Grid）連線**，�
 
 一句話總結：OSPF 是「鏈路變了**之後**才重算」；snapshot 是「**事先**全部算好，時間到就切換」；OPSPF 則是「可預測的變化用預測**即時**算，不可預測的故障**事後**用 OSPF 補」。
 
+## 2.5 圖解：OSPF 和 OPSPF 怎麼跑（流程圖）
+> 這一節只放圖，把散在各節的東西串成一條線。名詞定義見 §0（LSA／LSU／LSDB／路由表），flag 細節見 §3.3，A–B–C–D 的完整故事見 §3.7。圖在 Obsidian 會自動畫出來（Mermaid）。
+
+### 2.5.1 各自用在哪、要解決什麼問題
+
+| | OSPF | OPSPF |
+|---|---|---|
+| 原本用在哪 | 地面網路：公司、校園、ISP 內部的路由器 | LEO 極軌星座（Walker Star），每顆衛星就是一台路由器 |
+| 拓樸怎麼變 | 很少變；變了多半是**意外**（光纖被挖斷、設備壞掉） | 一直在變；大多**可預測**（每圈進出極區兩次），少數是意外故障 |
+| 要解決的問題 | 意外發生後，讓全網盡快知道並改路 | 可預測的變化不要再廣播、不要掉包；意外故障仍然要能處理 |
+| 怎麼知道拓樸 | 只能「聽」：Hello ＋ LSA | 「算」＋「聽」：GPS 預測，只有意外才用 Hello／LSU |
+| 搬到衛星上的問題 | 每次極區斷線都當成意外：等逾時、全網廣播（約 543 ms、235 個控制封包） | — |
+| 自己的弱點 | — | 只對會穿過極區的星座有用；極區內的故障偵測不到；沒有 LSAck，LSU 掉了沒人知道 |
+
+### 2.5.2 OSPF：只靠「聽」
+
+```mermaid
+flowchart TD
+  H["每 10 s 對鄰居送 Hello"] --> R{"40 s 內有收到鄰居的 Hello？"}
+  R -- 有 --> H
+  R -- 沒有 --> D["判定鄰居斷了"]
+  D --> L["寫一張新 LSA<br/>序號 +1，拿掉斷的鏈路"]
+  L --> DB1["放進自己的 LSDB"]
+  DB1 --> S1["跑 SPF → 更新自己的路由表"]
+  L --> U["把 LSA 裝進 LSU<br/>送給還活著的鄰居"]
+  U --> RX{"收到的鄰居：<br/>序號比我手上的新？"}
+  RX -- 否 --> X["丟掉"]
+  RX -- 是 --> DB2["換掉 LSDB 裡的舊 LSA"]
+  DB2 --> ACK["回 LSAck"]
+  DB2 --> S2["跑 SPF → 更新路由表"]
+  DB2 --> FW["轉傳給其他鄰居"]
+  FW --> RX
+```
+
+- Hello 10 s、Dead 40 s 是 OSPF 的預設值，不是論文的設定。
+- **LSDB 先改，路由表是從 LSDB 算出來的。**
+
+**LSA、LSU、LSAck 在網路上怎麼跑**（A–B–C–D 圖，B–D 斷掉）：
+
+```mermaid
+sequenceDiagram
+  participant A
+  participant B
+  participant C
+  participant D
+  Note over B,D: B–D 斷了，兩端的 Hello 都逾時
+  B->>A: LSU［LSA：B 序號 2，只連 A］
+  A-->>B: LSAck
+  D->>C: LSU［LSA：D 序號 2，只連 C］
+  C-->>D: LSAck
+  A->>C: LSU［B 序號 2］
+  C-->>A: LSAck
+  C->>A: LSU［D 序號 2］
+  A-->>C: LSAck
+  C->>D: LSU［B 序號 2］
+  D-->>C: LSAck
+  A->>B: LSU［D 序號 2］
+  B-->>A: LSAck
+  Note over A,D: 全網 LSDB 又一樣 → 收斂
+```
+
+- 實線是 LSU（6 個），虛線是 LSAck（6 個）。**OPSPF 沒有虛線那 6 個。**
+
+### 2.5.3 Keepalive：怎麼判斷「鄰居斷了」
+
+OPSPF 用 keepalive counter（Fig. 5）；OSPF 用 Dead timer，概念一樣：「太久沒聽到對方就算斷」。
+
+```mermaid
+sequenceDiagram
+  participant A as A（counter 上限 3）
+  participant B
+  A->>B: Hello（counter 3 → 2）
+  B->>A: Hello（A 收到，counter 重設回 3）
+  Note over A,B: 鏈路正常時 counter 一直被重設，不會歸零
+  Note over B: B 對 A 的雷射壞了
+  A-xB: Hello（3 → 2）
+  A-xB: Hello（2 → 1）
+  A-xB: Hello（1 → 0）
+  Note over A: counter = 0 → local flag 設 Failure → SPF → 發 LSU
+```
+
+- 論文的 Hello 間隔是 1 s；counter 上限論文沒寫，3 是假設。
+- 只有 local flag = OK 的介面才會送 Hello；Ineffective（極區）完全不送。
+
+### 2.5.4 OPSPF 全貌：上半「算」、下半「聽」
+
+```mermaid
+flowchart TB
+  subgraph P["可預測部分：小算（static），每 1 秒"]
+    G["自己的 GPS 經緯度"] --> P1["Fig. 3：推出全星座位置"]
+    P1 --> P2["Fig. 2：逐條 ISL 判斷<br/>有衛星在極區 → 不可用"]
+    P2 --> P4["再扣掉 global flag = Failure 的鏈路"]
+    P4 --> DB["LSDB：每條 ISL 一列"]
+    DB --> RT["Dijkstra → 路由表（唯一）"]
+  end
+  RT -. "同時寫：自己的介面在極區 → Ineffective，否則 OK" .-> LF["local flag"]
+  subgraph Q["不可預測部分：小聽（dynamic），事件觸發"]
+    LF --> Q1{"local flag = OK？"}
+    Q1 -- "否" --> Q0["不送 Hello"]
+    Q1 -- 是 --> Q2["送 Hello，counter 減 1"]
+    Q2 --> Q5{"收到鄰居的 Hello？"}
+    Q5 -- "是：counter 重設" --> Q2
+    Q5 -- 否 --> Q3{"counter 歸零？"}
+    Q3 -- 否 --> Q2
+    Q3 -- 是 --> Q4["local flag = Failure<br/>發 LSU"]
+    Q4 --> GF["global flag：這條鏈路 = Failure"]
+    RX["收到別人的 LSU（新消息）"] --> GF
+  end
+  GF -- "下一秒讀到，或直接叫醒小算" --> P4
+```
+
+- 上半每秒都跑，**不送任何封包**；下半平常只有 Hello，出事才有 LSU。
+- 兩半只透過兩個 flag 溝通：小算寫 local、讀 global；小聽讀 local、寫 global。
+- 極區斷線**只經過上半**，所以不廣播；意外故障**從下半開始，經 global flag 回到上半**，最後還是由小算出路由表。
+
+### 2.5.5 可預測部分：同一次極區斷線，兩者怎麼處理
+
+```mermaid
+flowchart LR
+  subgraph O["OSPF"]
+    o1["A 飛進 70°<br/>A–B 實體斷"] --> o2["封包照送 A→B<br/>掉包"]
+    o2 --> o3["等 Hello 逾時"]
+    o3 --> o4["LSU 全網廣播<br/>＋LSAck"]
+    o4 --> o5["全網重跑 SPF"]
+    o5 --> o6["改走 A→C→D"]
+  end
+  subgraph N["OPSPF"]
+    n1["小算每秒用 GPS 算"] --> n2["預測 A 超過 70°"]
+    n2 --> n3["斷之前就拿掉 A–B<br/>改走 A→C→D"]
+    n3 --> n4["local flag = Ineffective<br/>不送 Hello"]
+    n4 --> n5["沒有 LSU、沒有掉包"]
+  end
+```
+
+- 每顆衛星都用同一套公式算，所以不必互相通知，全網的 LSDB 自然一致。
+- 本文結果：OSPF 約 543 ms、235 個控制封包；OPSPF 0 ms、0 個。
+
+### 2.5.6 不可預測部分：故障、恢復、收到 LSU
+
+```mermaid
+flowchart TD
+  E1["事件 1：故障（Fig. 5）"] --> F1["counter 歸零"]
+  F1 --> F2["local flag = Failure"]
+  F2 --> F3["SPF"]
+  F3 --> F4["發 LSU"]
+  E2["事件 2：恢復（Fig. 6）"] --> R1["修好的那顆：local flag = OK<br/>counter 重設、SPF，不廣播"]
+  R1 --> R2["重新對鄰居送 Hello"]
+  R2 --> R3["鄰居收到來自 Failure 介面的 Hello<br/>設 OK → SPF → 發 LSU"]
+  F4 --> E3
+  R3 --> E3
+  E3["事件 3：收到 LSU（Fig. 7）"] --> C1{"和 LSDB 比，是新消息？"}
+  C1 -- 否 --> C2["丟掉"]
+  C1 -- 是 --> C3["更新 flag → SPF → 再轉傳"]
+```
+
+- 這部分幾乎就是 OSPF，只差兩點：**只在 local flag = OK 時偵測**，而且**沒有 LSAck**。
+- 真實例子是論文 Fig. 8：E 的介面 0 故障 → A 的 Hello 逾時 → A 發 LSU → 一圈圈傳到全部九顆。
+
 ## 3. Method
 四個部分的分工：static module 處理可預測的變化，dynamic module 處理突發故障，兩者寫入同一張 routing table。
 
@@ -194,20 +411,33 @@ OPSPF 的拓樸是**標準的 polar 星座加上網格狀（+Grid）連線**，�
 - **玩具例子**（M = 3、N = 4 → $c_0$ = 90°、$c_2$ = 60°；假設 $c_1$ = 45°、d = +1；自己在經度 0°、緯度 10°）：同軌道下一顆緯度 10 + 90 = 100 → 摺返成 80°；下一條軌道同編號那顆經度 60°、緯度 55°。
 - **我驗算發現的問題**（論文沒提）：只記緯度、用同一個 d 一直加，**過了極點後方向沒有反轉**。例子裡同軌道第三顆應在 10 + 180 = 190° 的位置（緯度 −10°），照 pseudocode 卻是 80 + 90 = 170 → 摺返成 +10°，南北顛倒。正確做法要追蹤繞過的角度，或摺返時把 d 反號、經度加 180°。可能只是 pseudocode 的簡化寫法，實際程式未必有這問題。
 
-**3.3 Hybrid architecture（銜接 static 和 dynamic）**：六個 module（static routing、dynamic routing、Geo data、LSDB & routing table、local flag、global flag）。
-- Local flag ∈ {Failure, OK, Ineffective}：Ineffective 代表在 polar region 內，鏈路本來就該斷，因此不送 Hello；只有 OK 才送 Hello。
-- Global flag ∈ {Failure, OK}：由 LSU 得知其他衛星鏈路的故障狀態，回饋給 static module。
-- Static module 跑 Dijkstra 時會參考這些 flag，排除標為 Failure 的鏈路。
+**3.3 Hybrid architecture（Fig. 4）**
+Fig. 4 有六個框，分上下兩排：上排是 static（小算），下排是 dynamic（小聽），兩個 flag 是它們之間傳紙條的白板。
 
 **比喻：一間指揮站裡的兩個人**
 - **小算（static module）**：拿著 GPS 手錶，每秒推算位置、畫地圖、跑 Dijkstra，**唯一能寫路由表**。
-- **小聽（dynamic module）**：負責 OSPF 那套，打招呼（Hello）、收發廣播（LSU），專門抓意外故障。**不直接改表**，只寫白板（flag）。
+- **小聽（dynamic module）**：負責 OSPF 那套，打招呼（Hello）、收發廣播（LSU），專門抓意外故障。**不直接改路由表**，只寫白板（flag）。
+
+**六個框各是什麼**
+
+| 框 | 是什麼 | 誰寫 | 誰讀 | 放大圖 |
+|---|---|---|---|---|
+| Satellite Geo data | **只有自己**的經緯度（GPS），不是全網資料 | GPS | 小算 | — |
+| Static route calculation（小算） | 推全網位置 → 判斷每條 ISL 通不通 → Dijkstra | — | — | **Fig. 2**（位置推算在 Fig. 3） |
+| LSDB & routing table | 全網地圖＋自己的路由表，只有一份 | 小算 | 封包轉送 | — |
+| Local interface flag | 自己每個介面的狀態 | 小算（極區）；小聽（故障／恢復） | 小聽 | — |
+| Dynamic route detection（小聽） | Hello 偵測、收發 LSU | — | — | **Fig. 5、6、7** |
+| Global interface flag | 全網哪些鏈路意外壞了 | 小聽（依 LSU） | 小算 | — |
+
+- 原文：小算「also updates the local interface flag for each network interface」；小聽「will update the local interface flag into the global interface flag」。
+- Fig. 2 畫的是還沒接 flag 的版本，所以放大圖裡看不到 global flag 的輸入和 local flag 的輸出。
 
 **Fig. 4 配線圖**
+
 ```
- GPS ──────────────┐
-                   ▼
- global flag ──▶ [小算 static] ──▶ 路由表（唯一）
+ GPS（自己的經緯度）─┐
+                     ▼
+ global flag ──▶ [小算 static] ──▶ LSDB & 路由表（唯一）
    ▲               │
    │               ▼ 寫 Ineffective / OK
    │           local flag
@@ -215,9 +445,50 @@ OPSPF 的拓樸是**標準的 polar 星座加上網格狀（+Grid）連線**，�
    │               ▼
    └────────── [小聽 dynamic] ◀──▶ 鄰居的 Hello / LSU
 ```
-- 小算吃兩個輸入：GPS 位置和 global flag；小聽吃 local flag，產出 global flag 回饋給小算。
-- **兩個時鐘**：小算是「同步」的，每 1 秒跑一次；小聽是「非同步」的，事件來了就處理。小聽處理完可以**直接叫小算立刻重算**，不用等下一秒。
+
+- 一圈的順序：GPS ＋ global flag → 小算 → 路由表 ＋ local flag → 小聽 → global flag → 回到小算。
+- **兩個時鐘**：小算是「同步」的，每 1 秒跑一次；小聽是「非同步」的，事件來了就處理。小聽處理完可以**直接叫小算立刻重算**，不用等下一秒（只寫在正文，圖上沒畫）。
 - 這就回答了 §III-A 的兩個設計問題：觸發方式是「定時＋必要時被叫醒」；路由表只有一張，由小算寫，所以不會衝突。
+- 小算知道鏈路斷了只有兩個管道：**GPS 告訴它「該斷的」，global flag 告訴它「意外斷的」**。極區斷線每顆衛星都自己算得出來，所以不用任何人通知。
+
+**兩個 flag 對照**
+
+| | Local flag | Global flag |
+|---|---|---|
+| 管誰 | 自己的每個介面（每介面一格，最多 4 個 ISL 介面） | 全網每條鏈路（推測：每條一格） |
+| 狀態 | OK／Failure／**Ineffective** | OK／Failure |
+| 意思 | Ineffective = 在極區、本來就該斷；只有 OK 才送 Hello | Failure = 預測說通、但其實壞了 |
+| 每顆衛星內容一樣嗎 | 不一樣 | 收斂後一樣 |
+
+- 例（Fig. 8 故障後；介面編號除了 A(2) 連 E 之外是假設）：
+  - A 的 local：A(0) 上 OK、A(1) 下 OK、A(2) 連 E **Failure**、A(3) OK。A 若在極區，跨軌的 A(2)、A(3) 會是 Ineffective。
+  - A 的 global：A–E Failure，其他全 OK。
+  - 遠方的 C：local 全 OK（C 自己沒壞）；global 和 A 一樣（從 LSU 聽來）。
+- 極區斷線不會進 global flag（global 沒有 Ineffective），因為每顆衛星都能自己算出來。
+
+**OPSPF 的 LSDB 長什麼樣**（論文只說把每條 ISL「label the connectivity … which will further update the LSDB」，格式是推測）
+- 一條 ISL 一列，LEO-48 共 88 列（§0.5 的推算）。每秒由小算重算、覆蓋舊的。
+- 一條 ISL 不能用 = 預測斷（極區）**或** global flag = Failure。實作上大概只存合併後的結果。
+- **成本論文沒定義**。推測每條都一樣（等於數跳數）：Fig. 16 說「同樣跳數，延遲也可能不同」；OSPF 預設成本由頻寬決定，而 ISL 規格都一樣。後果是 OPSPF 找的是最少跳數，不一定是最低延遲（StepClimb 則用實際距離）。
+
+| ISL | 成本 | 能用？ | 原因 |
+|---|---|---|---|
+| S11–S12 | 1 | ✅ | 同軌永遠連著 |
+| S14–S24 | 1 | ❌ | S14 在極區（預測） |
+| S35–S45 | 1 | ❌ | global flag = Failure |
+
+（後兩列是編的例子。）
+
+**和 OSPF 比**（類比，論文沒這樣比）
+
+| | OSPF | OPSPF |
+|---|---|---|
+| 自己的介面 | 鄰居狀態機（Down … Full 共 7 種） | local flag 3 種，多了 Ineffective |
+| 全網的鏈路 | LSDB 裡每台的 LSA，記全部鏈路 | global flag，只記意外壞掉的 |
+| 地圖從哪來 | 全靠別人寄 LSA 來拼 | 自己用 GPS 預測，global flag 只負責扣掉壞的 |
+| 誰算路由 | 收到 LSU 就自己跑 SPF | 永遠是小算；LSU 只負責寫 global flag |
+
+- 比喻：OSPF 是大家寄明信片來拼一整張地圖；OPSPF 是手上已經有官方地圖，只在上面貼「此路施工中」的便利貼。
 
 **3.4 Asynchronous events（類似 OSPF 的部分，處理突發故障）**
 1. Failure：每送一個 Hello，Keepalive Counter 減 1，收到 Hello 就 reset；歸 0 → 設 Failure → SPF → flood LSU。
@@ -226,6 +497,7 @@ OPSPF 的拓樸是**標準的 polar 星座加上網格狀（+Grid）連線**，�
 - 最壞收斂時間 $T_c=T_d+T_p+T_s$（Keepalive 上限＋最長傳播時間＋SPF 時間），正好就是一條鏈：小聽倒數到 0（事件 1）→ LSU 傳到最遠的衛星（事件 3）→ 被叫醒的小算跑一次 Dijkstra。
 
 **三個事件動到哪塊白板**
+
 | 事件 | 小聽做什麼 | 動到的白板 | 接著 | 廣播 |
 |---|---|---|---|---|
 | 1. 故障（Fig. 5） | counter 歸零 → 判定鄰居壞了 | **local**：OK → Failure | 叫小算重算 | 有 |
@@ -270,11 +542,13 @@ OPSPF 的拓樸是**標準的 polar 星座加上網格狀（+Grid）連線**，�
 結論：OSPF 每次變化都慢；snapshot 遇到突發故障束手無策；OPSPF 結合兩者的優點。
 
 ## 3.6 四顆衛星走一遍 Fig. 2–7
+
 ```
  A ——— B      A–B、C–D：inter-plane（會因極區斷）
  |     |      A–C、B–D：intra-plane（永遠連著）
  C ——— D      A 要送到 D，一開始走 A→C→D
 ```
+
 假設 Keepalive Counter 最大值 = 3，Hello 每 1 秒一次。
 
 | 時間 | 事件 | 經過哪些圖 | 白板變化 | 廣播 | A→D 路由 |
@@ -288,6 +562,47 @@ OPSPF 的拓樸是**標準的 polar 星座加上網格狀（+Grid）連線**，�
 - 若 A 在極區時 A–B 真的壞了（30–40 s），因為不送 Hello，**發現不了**，要等出極區才偵測到，這是作者自己承認的限制。
 - 一句話：**可預測的事只走 Fig. 2；意外的事從 Fig. 5 或 Fig. 6 開始、經過 Fig. 7 擴散，最後透過 Fig. 4 的 flag 回到 Fig. 2 重算。**
 
+## 3.7 對著 Fig. 4 看 OSPF 和 OPSPF：兩個故事
+> 玩具數字（距離成本、緯度、OSPF 預設 Hello 10 s／Dead 40 s）是說明用；只有「每 1 秒算一次」和「±70°」來自論文。
+
+```
+軌道1   軌道2
+  A ——3—— B      高緯度，兩條軌道靠得近
+  |       |
+  5       5
+  |       |
+  C ——6—— D      低緯度，兩條軌道離得遠
+```
+
+A 要送到 D：A→B→D = 8，A→C→D = 11，平常走 A→B→D。
+
+**先記一句：OSPF ＝ Fig. 4 的下排；OPSPF ＝ 下排 ＋ 新加的上排（GPS 預測），中間用兩個 flag 接起來。**
+- OSPF 沒有 Geo data、Ineffective 和定時預測的小算，只在收到 LSU 時才跑 SPF（對照表見 §3.3）。
+
+**故事一：A、B 一開始就在極區（72°），之後飛出去**
+
+| 階段 | OPSPF（上排在動） | OSPF（只有下排） |
+|---|---|---|
+| 72°，在極區 | GPS → 小算標 local A–B = **Ineffective**，算路不用它 → **A→C→D**；小聽不對 A–B 送 Hello；global 全是 OK，**沒有 LSU** | A–B 本來就連不上，沒建鄰居 → 也走 A→C→D（起點兩邊差不多） |
+| 飛到 69°，出極區 | GPS 顯示 < 70°、global A–B 也是 OK → 小算放回 A–B → **A→B→D**；小聽恢復 Hello，收到回應 | 收到 Hello → 交換資料庫建鄰居 → LSU 全網廣播 → 大家重跑 SPF → A→B→D；這段期間只是繞遠路，不掉包 |
+| （反過來）從 69° 飛進 70° | 小算**斷之前**就改走 A→C→D，不等、不廣播 | 斷了也不知道，封包照送 A→B 而**掉**；等 Dead 40 s → LSU 全網廣播 → 重算；Walker Star 每顆衛星每圈進出兩次，所以全網一直在廣播 |
+
+- **在極區時 A–B 其實壞了？** OPSPF 不送 Hello，所以沒人發現（論文 §III-D：「nothing will happen until E moves out of the polar region」）。出極區時小算看 global 還是 OK，會先把路由改回 A→B→D；等 Hello 逾時 → LSU → global A–B = Failure → 改回 A→C→D。
+- （推測）中間等 Hello 逾時的空窗，往 A→B 的封包可能會掉，論文沒討論這段多長。
+
+**故事二：B–D 突然壞掉（不在極區）**
+
+| 步驟 | OSPF | OPSPF（Fig. 4 箭頭） |
+|---|---|---|
+| 偵測 | Hello 收不到 → 逾時 → 判定故障 | 一樣；local B–D 是 OK 才有在送 Hello（Fig. 5） |
+| 廣播 | LSU 全網 flood | 一樣（Fig. 7） |
+| 寫白板 | 沒有白板 | 小聽寫 **global B–D = Failure** |
+| 誰算路 | 收到 LSU 的衛星**自己直接**跑 SPF | global flag 進小算的 Input → 小算被叫醒或等下一秒 → 扣掉 B–D 跑 Dijkstra → **A→C→D** |
+| 修好 | Hello 恢復 → LSU → 重跑 SPF | Fig. 6：鄰居收到 Hello → LSU → global B–D = OK → 小算重算 → A→B→D |
+
+- 偵測和廣播兩邊幾乎一樣。差別是 OPSPF 的 LSU 只負責把消息寫進白板，**真正算路由的永遠是小算**，所以只有一張路由表，不會出現靜態、動態各算一張的 coherence 問題（§III-A）。
+- 對照 [3.5](#35-範例三種方法如何處理同一事件) 的數字：OSPF 處理規律變化約 543 ms、235 個控制封包；OPSPF 處理規律變化 0 個封包，處理突發故障約 100 ms、101 個封包。
+
 ## 4. Evaluation Setup（§IV-A Methodology）
 > 這節就是在交代「實驗場怎麼搭」。工具本身是什麼見 §0「實驗工具」。
 
@@ -297,6 +612,7 @@ OPSPF 的拓樸是**標準的 polar 星座加上網格狀（+Grid）連線**，�
 3. **跑協定**：同一個網路、同一份流量和故障劇本，分別裝 OSPF 和 OPSPF 跑，從 log 數控制封包數和收斂時間。**Baseline 只有 OSPF**。
 
 ### 4.2 參數（Table I＋正文）
+
 | 參數 | 值 | 白話 |
 |---|---|---|
 | 軌道數 × 每軌衛星數 | 6 × 8 | 48 顆，Walker Star 型的 polar 星座 |
@@ -398,6 +714,7 @@ STK、Exata、LEO-48、CBR、4897 行 C 這些只是實驗環境，知道就好�
 - StableRoute 做的事，就是**把這一格換成 SR_L／SR_K／SR_G**；其他部分（GPS 推位置、極區判斷、flag、Hello/LSU）可以照舊。
 
 **用 A、B、C、D 的例子看**（A 要送到 D；A–B、C–D 是 inter-plane）
+
 | 時間 | 事件 | OPSPF（普通 Dijkstra） | 換成 StableRoute |
 |---|---|---|---|
 | 10 s | C–D 壞了 | A→C→D 斷了，**必須**改走 A→B→D | 一樣必須換（**S1**，避免不了） |
