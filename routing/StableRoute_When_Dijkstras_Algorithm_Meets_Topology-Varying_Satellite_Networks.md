@@ -42,6 +42,117 @@ StableRoute 沒有換掉 Dijkstra，只是讓它在不必換路的時候就不�
 * **SNG（Satellite Network Generator）**：作者基於 **Mininet** 寫的工具。Mininet 是開源工具，能在一台 Linux 電腦上建出很多虛擬節點和鏈路，跑**真實的協定程式碼**。SNG 用它建出虛擬衛星網路，並依照 SPP 的資料開關鏈路。
 * **流程**：STK 算軌道 → SPP 轉成鏈路開關時間表 → SNG 在 Mininet 上建網路、跑路由。OPSPF 用的是同樣的 STK，但網路部分用 Exata。
 
+### 衛星位置怎麼預測：TLE、GPS、SGP4、STK
+StableRoute 和 OPSPF 都說「衛星軌跡可預測」。實際上靠的是下面四樣東西，分成三種角色：**量現在的位置、記錄資料、往未來推**。
+
+| | 是什麼 | 角色 | 比喻 |
+|---|---|---|---|
+| **GPS** | 衛星上的接收器，量出自己**現在**在哪 | 量測（在衛星上） | 看手機地圖知道「我現在在這」 |
+| **TLE**（Two-Line Element set） | 美國太空軍用地面雷達追蹤後，定期發布的兩行軌道資料（CelesTrak、Space-Track 可免費下載） | 資料（某一刻的軌道） | 一張寫著「幾點、在哪條路、跑多快」的紙條 |
+| **SGP4** | 一套軌道推算公式／程式 | 往未來推 | 計算機：拿紙條算出 1 小時後在哪 |
+| **STK**（Systems Tool Kit） | AGI（現屬 Ansys）的商用軟體 | 全包的工具箱 | 一整套導航 App |
+
+```
+量現在的位置               往未來推                  網路要的東西
+地面雷達 ──→ TLE ──┐
+                   ├──→ SGP4（或其他模型）──→ 未來位置 ──→ ISL 開關 ──→ 拓樸 ──→ 路由
+衛星上的 GPS ──────┘
+          ╰─────────────── STK 把這一段全包了 ───────────────╯
+```
+
+* **TLE 的重要欄位**：衛星編號、**epoch**（這筆資料是哪一刻）、傾角、RAAN（軌道平面的方向，Walker 星座各軌道靠它錯開）、離心率（接近 0 就是圓軌道）、每天繞幾圈、大氣阻力項 B*。
+* **TLE 和 SGP4 是一對**：TLE 是專門給 SGP4 用的格式，配別的模型反而會不準。
+* **GPS 和 TLE 都是「現在」的起點**，差在誰量的：
+    * TLE：地面從外面看，人人拿得到，但只有幾公里的精度，而且一兩天才更新一次。離 epoch 越久越不準；衛星變軌後舊的就不能用。
+    * GPS：衛星自己量，精確到公尺級、隨時都有，但只有衛星自己（或營運商）知道。
+* **STK 是工具箱**：裡面有 SGP4，也有更精確的模型；可以吃 TLE，也可以自己設定星座參數。還會算「兩顆衛星看不看得到彼此」，也就是 ISL 能不能開。
+* **做路由研究需要知道的程度**：位置計算交給現成工具；要關心的是**預測什麼時候不可信**（TLE 太舊、變軌、故障），以及**誰來算**（地面先算好上傳，還是衛星自己算）。
+
+**各論文用哪一種**
+| 論文 | 位置從哪來 | 誰算 |
+|---|---|---|
+| StableRoute | STK 自己設定理想 Walker 星座，**沒用 TLE 和 GPS**；論文沒寫 STK 用哪個模型 | 真實系統沒交代 |
+| OPSPF | 每顆衛星用 GPS 知道自己在哪，再用軌道幾何推算別人；實驗也用 STK | 每顆衛星自己 |
+| DoTD | 真實 Starlink TLE，所以星座不整齊 | 預先算好約 10 分鐘的拓樸 |
+| Starlink self-driving | 用 SGP4 從前一筆 TLE 推出「沒變軌的話應該在哪」，再和下一筆 TLE 比，對不上就是變軌 | （量測論文） |
+
+**想深入**：Vallado et al.〈Revisiting Spacetrack Report #3〉（AIAA 2006，SGP4 的標準參考，[免費](https://celestrak.org/publications/AIAA/2006-6753/)），只讀前半講 SGP4 在算什麼的部分就夠。
+
+## 背景：ISL 拓樸（+Grid 和同一層的其他設計）
+**這一層在做什麼**：先決定「每顆衛星的雷射 ISL 要接到哪幾顆衛星」，接好的線就是路由看到的圖。StableRoute、OPSPF、OSPF 都是**這張圖上面**的路由層；這一節講的是**下面那層**：圖本身怎麼長。比喻：拓樸設計是「修哪幾條路」，路由是「在修好的路上選怎麼走」。
+
+### +Grid（本文和 OPSPF 用的拓樸）
+* **定義**：每顆衛星 4 條 ISL：
+    * **2 條同軌（intra-plane）**：連同一條軌道上的前一顆和後一顆。
+    * **2 條跨軌（inter-plane）**：連左右相鄰軌道上、編號相同的那顆。
+* **長相**：像棋盤，每格往上下左右各一條線（所以叫「+」）。同軌方向首尾相接成環；Walker Delta 的跨軌方向也繞一圈，整張圖像甜甜圈表面（torus）。
+```
+   軌道1  軌道2  軌道3
+    o------o------o      o = 衛星
+    |      |      |      | = 同軌 ISL（一直都在）
+    o------o------o      - = 跨軌 ISL（高緯度或軌道交會處會斷）
+    |      |      |
+    o------o------o
+```
+* **Walker Star 的 seam**：第一條和最後一條軌道並排但反向飛，相對速度太大，中間不接線，所以棋盤只有左右兩邊的邊界，不是完整的甜甜圈。
+* **為什麼會斷**：同軌 ISL 前後兩顆一起飛，幾乎不會斷。跨軌 ISL 在軌道交會處（Walker Star 在極區、Walker Delta 在中緯度）左右鄰居會換邊、天線轉不過去，只好暫時關掉（Fig. 1，OPSPF 用 >70° 關線）。**StableRoute 處理的「拓樸變化」主要就是這些跨軌 ISL 的開和關**。
+* **為什麼大家都用**：Iridium 就是這樣接；規則簡單、每顆衛星接法一樣；相連的兩顆相對速度小，線可以撐很久。
+* **和本文的關係**：
+    * **很多等長路**：棋盤上從 A 到 B，「先往右再往上」和「先往上再往右」跳數一樣。這就是 **Scenario 2（換到另一條一樣短的路）占 31.9%** 的原因，SR_L 的 next-hop set 才常常有東西可選。
+    * **鄰居最多 4 個**：next-hop set 最多 4 個成員，SR_G 每步最多 4 種選擇，所以樸素窮舉是 **4^m**。
+    * **我的推論（論文沒說）**：如果換成下面那些拓樸，等長路會變少，SR_L 能「不換路」的機會可能變小；論文只測 +Grid，這點沒有驗證。
+* **缺點**：只接最近的鄰居，遠距離要走很多跳。Motif 論文的數字：+Grid 平均 stretch（延遲比）1.25 已經很低，但平均跳數 10.57 很高；DoTD 論文的紐約→舊金山例子 +Grid 要 22 跳，DoTD 5 跳。
+
+### 同一層的其他拓樸
+都在回答同一個問題：每顆衛星有限的雷射頭（通常 4 個）要接誰。
+
+| 拓樸 | 每顆幾條 | 接誰 | 會不會換線 | 一句話 |
+|---|---|---|---|---|
+| **只有同軌（ring）** | 2 | 同軌前後 | 不換 | 最穩但每條軌道各自孤立，要靠地面站轉；只能當比較的底線 |
+| **+Grid** | 4 | 同軌前後 + 左右軌道同編號 | 只在交會處關跨軌線 | 本文用的，見上 |
+| **3 條 backbone（LAMP 的骨幹）** | 3 | 同軌前後 + 1 條跨軌，東西交錯 | 不換 | 比 +Grid 少 1/4 的線，延遲 +18.4%，省下的雷射頭拿去接臨時線 |
+| **xGrid** | 4 | 跨軌改接斜對角那顆（我的理解，未核對原文） | 和 +Grid 類似 | DoTD 程式裡的 `CROSS_GRID` baseline |
+| **Motif**（CoNEXT 2019） | 4 | 窮舉「一顆衛星往外接哪 2 顆」的局部樣式，全星座套同一個 | 不換 | +Grid 只是 1,029 個 motif 裡的一個；最好的 motif 的 Φ1 比 +Grid 少約 45% |
+| **Multi-motif** | 4 | 依緯度分 3 區，每區用不同 motif | 跨區時換，約每 12 分鐘 | 比單一 motif 再好約 7% |
+| **LAMP**（ICC 2025） | 3 固定 + 1 臨時 | 第 4 個雷射頭臨時接剛好飛很近的遠軌道衛星 | 臨時線會換 | 延遲比 +Grid 少 18.5% |
+| **DoTD**（INFOCOM 2025） | 4 | 每個時段每顆衛星重選分數最高的 4 顆 | 每個時段都可能換 | 用真實 TLE（907 顆 Starlink），論文自稱最佳但其實是 greedy |
+
+* **一條光譜**：從「完全不換線、規則固定」（ring、+Grid、motif）到「一直換、針對當下最佳化」（LAMP、DoTD）。越往右延遲越低，但**拓樸變化越多**，路由層的負擔越大。
+* **為什麼這和 StableRoute 有關**：StableRoute 的目標正是「拓樸變了，路盡量不要換」。拓樸設計越激進（DoTD、LAMP），StableRoute 這種方法越有用武之地，但論文只測了 +Grid 這種最平靜的拓樸。這是我的推論，可以當成延伸方向。
+* **不是同一層的**：Slim（INFOCOM 2024）決定的是「星座要幾顆衛星」，比拓樸再下面一層；Starlink self-driving（MobiCom 2023）講衛星變軌造成的拓樸變化，是拓樸變化的**來源**之一。
+
+### 延伸閱讀（你已經有筆記）
+* Motif：[[Network_topology_design_at_27000_km_hour]]
+* LAMP
+* DoTD：[[Time-_Dependent_Network_Topology_Optimization_for_LEO_Satellite_Constellations]]
+* Slim：[[Your Mega-Constellations Can Be Slim]]
+
+## 背景：Snapshot 路由（取自 [18] 的 Introduction）
+StableRoute 的 Related Work 把 [15–18] 歸成「snapshot 路由」，SR_G 也是在一串 snapshot 上做事。這一節整理 [18]（Tang et al., INFOCOM Workshops 2015）Introduction 講的基本概念。
+
+### Snapshot 路由是什麼
+* **想法**：衛星的拓樸雖然一直變，但**可以預測**。所以把一個軌道週期切成很多時間片（snapshot），每一片裡當作拓樸不變（哪些 ISL 開著、每條延遲多少都固定）。
+* **做法**：每一片預先算好一張路由表，衛星照時間表到點就換表。
+* **比喻**：像公車的「平日時刻表、假日時刻表」。路況會變，但變化是事先知道的，所以按時間切換就好，不用每次塞車才重新規劃。
+
+### 兩種切法
+| | Natural partition（Gounder 1999，StableRoute [17]） | Equal partition（Werner 1997，StableRoute [16]） |
+|---|---|---|
+| 怎麼切 | 只要有一條 ISL 建立或中斷，就開一個新 snapshot | 每隔固定時間切一次。Iridium 用 2.5 分鐘（150 s） |
+| 好處 | 跟著真實的 ISL 開關走，**ISL 利用率高** | snapshot 長度都一樣，路由演算法**簡單、穩定** |
+| 壞處 | snapshot 數量多、長短不一（Iridium 一個週期 44 個；極區邊界 65° 時最短只有約 10 s） | 切點和 ISL 實際開關對不上，用到的 ISL 比較少 |
+
+* **兩個優點分不開**：[18] 認為原因是 ISL 的指派方式固定不變（每顆衛星永遠連同樣的鄰居，只在極區開關）。
+* **[18] 的解法**：每次切換路由表時，順便把跨軌 ISL **重新配對**（要用 phased-array antenna 才能快速換對象），讓「一斷一接」合併成一次切換。結果 Iridium 一個週期是 22 個等長的 snapshot（每個 274.31 s），和極區邊界設在幾度無關。詳細見 [[Improving_the_snapshot_routing_performance_through_reassigning_the_inter-satellite_links]]。
+
+### 和 StableRoute 的關係
+* **SR_G 的 snapshot 是 natural 切法**：每次 ISL 斷或連就是一個新 snapshot（見下面 System Model）。
+* **StableRoute 對 snapshot 路由的批評**（§VI）：它們只在乎效能，沒處理路由穩定。但在同一個 snapshot 裡路由本來就不會變，換路只發生在 snapshot 切換時。所以 snapshot 越少、越長，換路機會越少。這是我的推論，論文沒這樣比。
+* **兩種「減少換路」的方向**：
+    * [18] 從**拓樸層**下手：改 ISL 怎麼接，讓 snapshot 變少（44 → 22）。
+    * StableRoute 從**路由層**下手：拓樸照樣變，但每次變的時候盡量選和原本一樣的下一跳。
+    * 兩者理論上可以疊在一起用（推論）。
+
 ## 背景：TCP 為什麼怕換路
 * **TCP** 是網路上最常用的傳輸協定（網頁、檔案下載都靠它），負責讓資料完整、照順序送到：資料切成很多編號的小封包，接收端每收到一個就回報「收到第幾號了」。
 * 如果後送的封包比前面的先到，接收端會一直重複回報「還在等第 N 號」（duplicate ACK）。傳送端看到重複回報，會以為封包掉了，於是**重傳**（Fast Retransmit），並把傳送速度**降下來**。
@@ -146,6 +257,8 @@ Next-hop set O(n²) (set size ≤ 4); CountLength O(n) over n − 1 targets; SR_
     * The TCP results are single-flow examples rather than workloads.
     * Fig. 14 cuts both ways: Dijkstra's switch to the higher-bandwidth path causes heavy reordering (2271 retransmissions) until about 2.7 s, but afterwards it climbs much faster, and by 3.5 s it has delivered roughly 3.4×10⁷ B versus about 0.4×10⁷ B for SR_L/G, which stays on the congested path. Avoiding the switch avoids reordering but gives up the better path; the paper reports only retransmissions and does not discuss this.
     * With all weights set to 1, the many hop-count ties make S2 look larger than it would be under latency weights.
+    * **Perfect predictability is assumed, never tested.** The constellations are idealized Walker Star/Delta shells generated in STK (§V-A), not real TLE data, with no orbit-prediction error, maneuvers or failures. The paper does not say which orbit model STK used.
+    * **Where SR_G's snapshots come from is not specified.** The paper never says who computes the cycle's snapshots in a real system (ground or onboard), from what data (TLE, GPS), or how often they are refreshed. Real Starlink satellites maneuver on their own (see the Starlink self-driving paper), which breaks the "repeats every cycle" assumption; SR_G would then fall back on SR_L.
 
 ## 與其他筆記的關聯
 * 與 [[OPSPF_Orbit_Prediction_Shortest_Path_First_Routing_for_Resilient_LEO_Satellite_Networks]]（OPSPF）直接相關：同一個團隊（Tian Pan、Tao Huang，BUPT），StableRoute 引用 OPSPF 為 [5]，可以看成它的後續。

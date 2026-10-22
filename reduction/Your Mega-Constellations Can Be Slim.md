@@ -8,6 +8,9 @@ code: https://github.com/SpaceNetLab/MegaReduce
 tags: [LEO, constellation-design, survivability, mega-constellation, cost]
 ---
 
+## 一句話總結
+在每對 cell 都要有 r 條 edge-disjoint paths（survivability）、足夠 per-cell 容量、且路徑長度不超過 λ 倍最短 hop 數的條件下，MegaReduce 不直接解 NP-hard 的 ILP，而是用「max-flow 可行性檢查 + 對 Walker 星座的 O（軌道數）、M（每軌衛星數）做二分搜尋」找出最少衛星數，即使 r_min = 6 也比 Starlink／Kuiper 少用約 20%（20.05%／21.88%）的衛星。
+
 ## Introduction
 * **Trend**: companies such as SpaceX and Amazon are deploying LEO mega-constellations of thousands of satellites. Since most of these LEO satellite networks (LSNs) are still being built out, how many satellites are actually needed is a timely question.
 * **Trade-off**: more satellites improve survivability and performance, but raise cost and governance problems such as conjunctions and space debris.
