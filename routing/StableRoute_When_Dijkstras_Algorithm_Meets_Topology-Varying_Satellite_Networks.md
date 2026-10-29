@@ -7,8 +7,15 @@ tags: [LEO, satellite-routing, ISL, Dijkstra, route-stability]
 ---
 
 ## 一句話總結
-StableRoute 沒有換掉 Dijkstra，只是讓它在不必換路的時候就不換。
-低軌衛星網路裡，不同軌道之間的連線會因為衛星移動一直斷掉又接回來，所以每顆衛星要不停重新計算「封包下一步要傳給誰」（下一跳）。問題是一般用的 Dijkstra 演算法沒有記憶：如果有好幾條路一樣短，它只會挑計算時第一個找到的那條，不管上次選的是哪條。所以就算原本的路還能用、也還是最短，它也可能突然換到另一條一樣短的路。這種沒必要的換路會讓封包順序亂掉，TCP 誤以為掉封包，就開始重傳、降速。StableRoute 的想法很簡單，就是讓 Dijkstra「念舊」：先把所有一樣短的下一跳都記下來，如果原本那個還在裡面就繼續用它，不要換。這是 SR_L。SR_K 更寬鬆一點，原本的路就算比最短路多 1～2 跳也照用，等於用多走一兩跳來換取穩定。SR_G 則是利用衛星軌道可以事先預測，直接把一整圈軌道週期的路線一次規劃好，讓換路次數最少。實驗結果是，在大型星座（40×40 Walker Star）上，跟原本的 Dijkstra 相比，換路次數大約少了 43～46%；小星座的改善少很多（4×4 只有約 10～14%）。你筆記裡提到的缺點是：論文只算了「換路次數」，沒有量延遲或吞吐量；TCP 的例子只有單一連線；而且每條連線的成本都設成 1，會讓「一樣短的路」比實際情況多，可能讓問題看起來比真的嚴重。
+**StableRoute 沒有換掉 Dijkstra，只是讓它在不必換路的時候就不換。**
+
+* **問題**：低軌衛星網路裡，不同軌道之間的連線會因為衛星移動一直斷掉又接回來，所以每顆衛星要不停重新計算「封包下一步要傳給誰」（下一跳）。一般用的 Dijkstra 沒有記憶：如果有好幾條路一樣短，它只會挑計算時第一個找到的那條，不管上次選的是哪條。所以就算原本的路還能用、也還是最短，它也可能突然換到另一條一樣短的路。這種沒必要的換路會讓封包順序亂掉，TCP 誤以為掉封包，就開始重傳、降速。
+* **做法**：讓 Dijkstra「念舊」，先把所有一樣短的下一跳都記下來：
+    * **SR_L**：原本的下一跳還在裡面就繼續用，不要換。
+    * **SR_K**：更寬鬆，原本的路就算比最短路多 1～2 跳也照用，用多走一兩跳換取穩定。
+    * **SR_G**：利用軌道可以事先預測，把一整圈軌道週期的路線一次規劃好，讓換路次數最少。
+* **結果**：大型星座（40×40 Walker Star）上，換路次數比原本的 Dijkstra 少約 43～46%；小星座改善少很多（4×4 只有約 10～14%）。
+* **缺點**：只算了「換路次數」，沒有量延遲或吞吐量；TCP 的例子只有單一連線；每條連線的成本都設成 1，會讓「一樣短的路」比實際情況多，可能讓問題看起來比真的嚴重。
 
 ## Introduction
 * **Problem:** In LEO networks, routes have to be recomputed all the time, and plain Dijkstra makes this worse. When several paths are equally short it keeps the first one it finds and ignores what it chose last time, so it often switches the next hop even when the current path still works and is still shortest. Each unnecessary switch reorders packets, which makes TCP assume loss, retransmit and slow down. The paper asks how to cut these avoidable route updates while staying within Dijkstra-based routing.
@@ -21,8 +28,11 @@ StableRoute 沒有換掉 Dijkstra，只是讓它在不必換路的時候就不�
     * **SR_G** uses the predictable orbits to plan a whole cycle of next-hop choices with the fewest changes.
 * In emulation, all three cut route updates by roughly 43–46% on a 40×40 constellation compared with plain Dijkstra.
 
-## 背景：星座類型與模擬工具
-### Walker Star 和 Walker Delta（§II-A）
+## 背景知識
+讀論文前需要的背景，分四塊：星座與工具、ISL 拓樸、Snapshot 路由、TCP 為什麼怕換路。
+
+### 星座類型與模擬工具
+#### Walker Star 和 Walker Delta（§II-A）
 * **傾角（inclination）**：軌道平面和赤道的夾角。0° 是沿著赤道繞，90° 是正好經過南北極（polar orbit，極軌道）。
 * **Walker 星座**：一種「平均擺放」衛星的標準設計，所有軌道高度、傾角都一樣，每條軌道上的衛星等間距。論文的 **N×N** 就是 N 條軌道、每條 N 顆。
 * **Walker Star**（論文例子：OneWeb，87.9°）：
@@ -36,13 +46,13 @@ StableRoute 沒有換掉 Dijkstra，只是讓它在不必換路的時候就不�
     * 本文只測一組 20×20（Fig. 12）。
 * **為什麼要分兩種**：ISL 是在「靠近軌道交會點」時斷（Fig. 1），交會點位置不同，斷線的地點和模式就不同。論文說 Walker Star 結構比較簡單，所以 SR_L（只看局部）和 SR_G（看全局）表現接近；Walker Delta 結構較複雜，SR_G 的全局優勢才明顯（46.93% vs SR_L 34.24%）。
 
-### STK、SPP、SNG（實驗用的工具鏈，§V-A）
+#### STK、SPP、SNG（實驗用的工具鏈，§V-A）
 * **STK（Systems Tool Kit）**：AGI（現屬 Ansys）出的商用衛星軌道模擬軟體，輸入軌道參數就算出**每顆衛星在每個時間點的位置**和 ISL 資訊。比喻：它是「天文台」，只告訴你衛星在哪，不管網路。
 * **SPP（Satellite Position Parser）**：作者自己寫的程式，讀 STK 的輸出，整理成「什麼時候哪條 ISL 存在」。
 * **SNG（Satellite Network Generator）**：作者基於 **Mininet** 寫的工具。Mininet 是開源工具，能在一台 Linux 電腦上建出很多虛擬節點和鏈路，跑**真實的協定程式碼**。SNG 用它建出虛擬衛星網路，並依照 SPP 的資料開關鏈路。
 * **流程**：STK 算軌道 → SPP 轉成鏈路開關時間表 → SNG 在 Mininet 上建網路、跑路由。OPSPF 用的是同樣的 STK，但網路部分用 Exata。
 
-### 衛星位置怎麼預測：TLE、GPS、SGP4、STK
+#### 衛星位置怎麼預測：TLE、GPS、SGP4、STK
 StableRoute 和 OPSPF 都說「衛星軌跡可預測」。實際上靠的是下面四樣東西，分成三種角色：**量現在的位置、記錄資料、往未來推**。
 
 | | 是什麼 | 角色 | 比喻 |
@@ -69,6 +79,7 @@ StableRoute 和 OPSPF 都說「衛星軌跡可預測」。實際上靠的是下�
 * **做路由研究需要知道的程度**：位置計算交給現成工具；要關心的是**預測什麼時候不可信**（TLE 太舊、變軌、故障），以及**誰來算**（地面先算好上傳，還是衛星自己算）。
 
 **各論文用哪一種**
+
 | 論文 | 位置從哪來 | 誰算 |
 |---|---|---|
 | StableRoute | STK 自己設定理想 Walker 星座，**沒用 TLE 和 GPS**；論文沒寫 STK 用哪個模型 | 真實系統沒交代 |
@@ -78,10 +89,10 @@ StableRoute 和 OPSPF 都說「衛星軌跡可預測」。實際上靠的是下�
 
 **想深入**：Vallado et al.〈Revisiting Spacetrack Report #3〉（AIAA 2006，SGP4 的標準參考，[免費](https://celestrak.org/publications/AIAA/2006-6753/)），只讀前半講 SGP4 在算什麼的部分就夠。
 
-## 背景：ISL 拓樸（+Grid 和同一層的其他設計）
+### ISL 拓樸（+Grid 和同一層的其他設計）
 **這一層在做什麼**：先決定「每顆衛星的雷射 ISL 要接到哪幾顆衛星」，接好的線就是路由看到的圖。StableRoute、OPSPF、OSPF 都是**這張圖上面**的路由層；這一節講的是**下面那層**：圖本身怎麼長。比喻：拓樸設計是「修哪幾條路」，路由是「在修好的路上選怎麼走」。
 
-### +Grid（本文和 OPSPF 用的拓樸）
+#### +Grid（本文和 OPSPF 用的拓樸）
 * **定義**：每顆衛星 4 條 ISL：
     * **2 條同軌（intra-plane）**：連同一條軌道上的前一顆和後一顆。
     * **2 條跨軌（inter-plane）**：連左右相鄰軌道上、編號相同的那顆。
@@ -103,7 +114,7 @@ StableRoute 和 OPSPF 都說「衛星軌跡可預測」。實際上靠的是下�
     * **我的推論（論文沒說）**：如果換成下面那些拓樸，等長路會變少，SR_L 能「不換路」的機會可能變小；論文只測 +Grid，這點沒有驗證。
 * **缺點**：只接最近的鄰居，遠距離要走很多跳。Motif 論文的數字：+Grid 平均 stretch（延遲比）1.25 已經很低，但平均跳數 10.57 很高；DoTD 論文的紐約→舊金山例子 +Grid 要 22 跳，DoTD 5 跳。
 
-### 同一層的其他拓樸
+#### 同一層的其他拓樸
 都在回答同一個問題：每顆衛星有限的雷射頭（通常 4 個）要接誰。
 
 | 拓樸 | 每顆幾條 | 接誰 | 會不會換線 | 一句話 |
@@ -121,21 +132,22 @@ StableRoute 和 OPSPF 都說「衛星軌跡可預測」。實際上靠的是下�
 * **為什麼這和 StableRoute 有關**：StableRoute 的目標正是「拓樸變了，路盡量不要換」。拓樸設計越激進（DoTD、LAMP），StableRoute 這種方法越有用武之地，但論文只測了 +Grid 這種最平靜的拓樸。這是我的推論，可以當成延伸方向。
 * **不是同一層的**：Slim（INFOCOM 2024）決定的是「星座要幾顆衛星」，比拓樸再下面一層；Starlink self-driving（MobiCom 2023）講衛星變軌造成的拓樸變化，是拓樸變化的**來源**之一。
 
-### 延伸閱讀（你已經有筆記）
+#### 延伸閱讀（你已經有筆記）
 * Motif：[[Network_topology_design_at_27000_km_hour]]
-* LAMP
+* LAMP：[[LAMP_Low-Latency_Dynamic_Topology_for_LEO_Satellite_Constellations]]
 * DoTD：[[Time-_Dependent_Network_Topology_Optimization_for_LEO_Satellite_Constellations]]
 * Slim：[[Your Mega-Constellations Can Be Slim]]
+* Handley（HotNets 2018，+Grid 接法和第 5 條臨時雷射的早期來源）：[[Delay_is_Not_an_Option_Low_Latency_Routing_in_Space]]
 
-## 背景：Snapshot 路由（取自 [18] 的 Introduction）
+### Snapshot 路由（取自 [18] 的 Introduction）
 StableRoute 的 Related Work 把 [15–18] 歸成「snapshot 路由」，SR_G 也是在一串 snapshot 上做事。這一節整理 [18]（Tang et al., INFOCOM Workshops 2015）Introduction 講的基本概念。
 
-### Snapshot 路由是什麼
+#### Snapshot 路由是什麼
 * **想法**：衛星的拓樸雖然一直變，但**可以預測**。所以把一個軌道週期切成很多時間片（snapshot），每一片裡當作拓樸不變（哪些 ISL 開著、每條延遲多少都固定）。
 * **做法**：每一片預先算好一張路由表，衛星照時間表到點就換表。
 * **比喻**：像公車的「平日時刻表、假日時刻表」。路況會變，但變化是事先知道的，所以按時間切換就好，不用每次塞車才重新規劃。
 
-### 兩種切法
+#### 兩種切法
 | | Natural partition（Gounder 1999，StableRoute [17]） | Equal partition（Werner 1997，StableRoute [16]） |
 |---|---|---|
 | 怎麼切 | 只要有一條 ISL 建立或中斷，就開一個新 snapshot | 每隔固定時間切一次。Iridium 用 2.5 分鐘（150 s） |
@@ -145,7 +157,7 @@ StableRoute 的 Related Work 把 [15–18] 歸成「snapshot 路由」，SR_G �
 * **兩個優點分不開**：[18] 認為原因是 ISL 的指派方式固定不變（每顆衛星永遠連同樣的鄰居，只在極區開關）。
 * **[18] 的解法**：每次切換路由表時，順便把跨軌 ISL **重新配對**（要用 phased-array antenna 才能快速換對象），讓「一斷一接」合併成一次切換。結果 Iridium 一個週期是 22 個等長的 snapshot（每個 274.31 s），和極區邊界設在幾度無關。詳細見 [[Improving_the_snapshot_routing_performance_through_reassigning_the_inter-satellite_links]]。
 
-### 和 StableRoute 的關係
+#### 和 StableRoute 的關係
 * **SR_G 的 snapshot 是 natural 切法**：每次 ISL 斷或連就是一個新 snapshot（見下面 System Model）。
 * **StableRoute 對 snapshot 路由的批評**（§VI）：它們只在乎效能，沒處理路由穩定。但在同一個 snapshot 裡路由本來就不會變，換路只發生在 snapshot 切換時。所以 snapshot 越少、越長，換路機會越少。這是我的推論，論文沒這樣比。
 * **兩種「減少換路」的方向**：
@@ -153,19 +165,32 @@ StableRoute 的 Related Work 把 [15–18] 歸成「snapshot 路由」，SR_G �
     * StableRoute 從**路由層**下手：拓樸照樣變，但每次變的時候盡量選和原本一樣的下一跳。
     * 兩者理論上可以疊在一起用（推論）。
 
-## 背景：TCP 為什麼怕換路
+### TCP 為什麼怕換路
 * **TCP** 是網路上最常用的傳輸協定（網頁、檔案下載都靠它），負責讓資料完整、照順序送到：資料切成很多編號的小封包，接收端每收到一個就回報「收到第幾號了」。
 * 如果後送的封包比前面的先到，接收端會一直重複回報「還在等第 N 號」（duplicate ACK）。傳送端看到重複回報，會以為封包掉了，於是**重傳**（Fast Retransmit），並把傳送速度**降下來**。
 * **Congestion window（壅塞視窗，cwnd）** 是 TCP 用來控制一次能送多少資料的設定，是依照目前這條路的狀況慢慢調出來的。換到新路後，舊的 cwnd 不一定適用：新路比較塞就會送太多而掉封包，新路比較寬就會用不滿頻寬。
 * 所以換路會傷 TCP：新路比舊路快時，後送的封包先到，順序亂掉，TCP 誤以為掉封包。封包其實沒丟，卻白白重傳又降速。這就是 StableRoute 要盡量減少換路的原因。
 
-### 論文的 TCP 實驗（§V-D，Fig. 13–15）
-* **實驗做法**：在模擬器裡架一個只有 s1～s6 幾顆衛星的小網路，從 s1 到 s6 開一條 TCP 連線持續傳資料，傳到一半故意讓某條連線斷掉或接回來，逼路由重算，再比較 Dijkstra（會換路）和 StableRoute（不換路）的重傳次數。
-* **圖怎麼看**：橫軸是時間（秒），縱軸是接收端照順序收到的資料量（sequence number，byte）。線越陡 = 傳得越快；線變平 = 卡住；變成一大片鋸齒 = 封包亂序、一直重傳。藍色實線是 Dijkstra，紅色虛線是 StableRoute。
-* **Fig. 13：換到比較塞的路（重傳 1240 次）**：2.3 秒前兩條線重疊；Dijkstra 換路後藍線幾乎變平，4.5～5 秒的小鋸齒是重傳。紅線（SR_L/G）留在原路，一路往上。這次換路讓 Dijkstra 的傳輸幾乎停擺。
-* **Fig. 14：換到比較寬的路（重傳 2271 次）**：1.1～2.7 秒那一大片藍色是嚴重亂序（新路的封包先到、舊路的封包還在後面）。2.7 秒後亂序結束，藍線快速爬升；紅線（SR_L/G）平穩但很慢，因為它留在比較塞的舊路上。到 3.5 秒時 Dijkstra 收到約 3.4×10⁷ B，StableRoute 只有約 0.4×10⁷ B。
-* **Fig. 15：換到短 1 跳的路（重傳 457 次）**：橫軸只放大 0.35～0.55 秒。約 0.42 秒 Dijkstra 換路後出現約 0.05 秒的鋸齒，之後恢復，藍線略落後紅線（SR_K）。影響只是一個短暫卡頓。
-* **我的質疑：時間範圍可能是挑過的**。三張圖都只畫換路前後很短的一段時間，看不到長期結果。Fig. 14 在畫出的範圍內就已經看到 Dijkstra 後來反超；Fig. 15 只畫了 0.2 秒，換到更短的路長期來說延遲更低，Dijkstra 很可能在更長的時間後追上甚至超越 SR_K。這是推論，論文沒有給更長時間的數據可以驗證。
+#### 另一條路：Handley 在接收端修亂序（HotNets 2018 §5）
+StableRoute 是在**路由層**減少換路；Handley 的想法正好相反：**照樣換路，到端點再把順序排回來**。他的出發點是：只要衛星裡不排隊，每條路的延遲都能提前幾百 ms 算出來，所以亂序是**可預測的**，什麼時候會亂、會差多少都知道。三種做法，一個比一個聰明：
+1. **接收端一律等到最慢的路**：接收地面站把快路來的封包先放著，等它們的單向延遲跟慢路一樣再交出去。一定不會亂序，但等於放棄快路的延遲優勢（論文說這樣第 20 好的路 RTT 仍約 74 ms，比現有網際網路 76 ms 好）。
+2. **只在需要時才等**：送出端在每個封包標上 **sequence number、path ID、t_last**（上一條路最後一個封包送出後經過的時間）。接收端看到 path ID 變了，就知道換路了；如果前面的封包還沒到，就把新路的封包先放著，但**最多等 t_diff − t_last**（t_diff 是兩條路已知的延遲差）。
+    * 為什麼是這個數：舊路最後一個封包比新路第一個封包早送 t_last，但在路上多花 t_diff，所以最晚比它晚 t_diff − t_last 到。過了這個時間還沒到，就是真的掉了。
+    * 例子：舊路 30 ms、新路 25 ms → t_diff = 5 ms；若 t_last = 2 ms，最多只等 3 ms。若 t_last ≥ t_diff，根本不會亂序。
+3. **送出端故意不照順序送**：送出端知道未來各路延遲，如果佇列裡有排隊的封包，就把後面的封包放到快路、前面的放到慢路，讓它們**照順序抵達**。主要給走次佳路徑的大量低優先權流量用。
+
+**和 StableRoute 的對照（我們的整理）**：
+
+| | Handley（端點修補） | StableRoute（路由層避免） |
+|---|---|---|
+| 換路 | 照換，選最快的路 | 能不換就不換 |
+| 亂序怎麼處理 | 接收端 buffer／標記／送出端排程吸收 | 減少換路次數，從源頭減少亂序 |
+| 需要什麼 | 改端點（地面站），封包要加欄位；靠「延遲可預測」 | 只改路由演算法，端點不用動 |
+| 代價 | 方法 1 犧牲延遲；方法 2、3 需要精確的延遲預測和額外標頭 | 可能留在比較慢或比較塞的路（像 Fig. 14 那樣） |
+
+* 兩者可以互補（推論）：StableRoute 把**不必要**的換路砍掉，剩下**必要**的換路（S1 鏈路真的斷了、或換到明顯更好的路）再用 Handley 的方法吸收亂序。
+* Handley 的三個方法都只是提案，論文沒有實作或實驗驗證。
+* 詳細見 [[Delay_is_Not_an_Option_Low_Latency_Routing_in_Space]] 的 §5.1。
 
 ## System Model
 * Each satellite has 4 ISLs: 2 intra-orbit and 2 inter-orbit. All ISL weights are 1, so path cost = hop count.
@@ -220,6 +245,14 @@ Next-hop set O(n²) (set size ≤ 4); CountLength O(n) over n − 1 targets; SR_
 * SR_L ≈ SR_G in Walker Star, but SR_G pulls clearly ahead in Walker Delta.
 * **TCP case studies** (single flow): Dijkstra's switches cause 1240 retransmissions when moving to a congested path, 2271 when moving to a higher-bandwidth path (reordering), and 457 when moving to a 1-hop-shorter path. SR_L / SR_G avoid the first two; SR_K avoids the third.
 
+### 論文的 TCP 實驗詳解（§V-D，Fig. 13–15）
+* **實驗做法**：在模擬器裡架一個只有 s1～s6 幾顆衛星的小網路，從 s1 到 s6 開一條 TCP 連線持續傳資料，傳到一半故意讓某條連線斷掉或接回來，逼路由重算，再比較 Dijkstra（會換路）和 StableRoute（不換路）的重傳次數。
+* **圖怎麼看**：橫軸是時間（秒），縱軸是接收端照順序收到的資料量（sequence number，byte）。線越陡 = 傳得越快；線變平 = 卡住；變成一大片鋸齒 = 封包亂序、一直重傳。藍色實線是 Dijkstra，紅色虛線是 StableRoute。
+* **Fig. 13：換到比較塞的路（重傳 1240 次）**：2.3 秒前兩條線重疊；Dijkstra 換路後藍線幾乎變平，4.5～5 秒的小鋸齒是重傳。紅線（SR_L/G）留在原路，一路往上。這次換路讓 Dijkstra 的傳輸幾乎停擺。
+* **Fig. 14：換到比較寬的路（重傳 2271 次）**：1.1～2.7 秒那一大片藍色是嚴重亂序（新路的封包先到、舊路的封包還在後面）。2.7 秒後亂序結束，藍線快速爬升；紅線（SR_L/G）平穩但很慢，因為它留在比較塞的舊路上。到 3.5 秒時 Dijkstra 收到約 3.4×10⁷ B，StableRoute 只有約 0.4×10⁷ B。
+* **Fig. 15：換到短 1 跳的路（重傳 457 次）**：橫軸只放大 0.35～0.55 秒。約 0.42 秒 Dijkstra 換路後出現約 0.05 秒的鋸齒，之後恢復，藍線略落後紅線（SR_K）。影響只是一個短暫卡頓。
+* **我的質疑：時間範圍可能是挑過的**。三張圖都只畫換路前後很短的一段時間，看不到長期結果。Fig. 14 在畫出的範圍內就已經看到 Dijkstra 後來反超；Fig. 15 只畫了 0.2 秒，換到更短的路長期來說延遲更低，Dijkstra 很可能在更長的時間後追上甚至超越 SR_K。這是推論，論文沒有給更長時間的數據可以驗證。
+
 ## 重現實驗（簡化版，2026-10）
 自己寫 Python 模擬重做「換路次數」實驗（Fig. 8–11），程式和圖在 project files 的 `notes/stableroute/sim/`。
 * **假設**（論文沒給的部分自己定）：N×N Walker Star、傾角 87.9°、高度 1200 km；任一端 |緯度| > 70° 就斷 inter-orbit ISL，出來後**同一條**接回；seam 兩側不連；權重全為 1；Dijkstra 平手時選編號最小的前驅。
@@ -261,7 +294,8 @@ Next-hop set O(n²) (set size ≤ 4); CountLength O(n) over n − 1 targets; SR_
     * **Where SR_G's snapshots come from is not specified.** The paper never says who computes the cycle's snapshots in a real system (ground or onboard), from what data (TLE, GPS), or how often they are refreshed. Real Starlink satellites maneuver on their own (see the Starlink self-driving paper), which breaks the "repeats every cycle" assumption; SR_G would then fall back on SR_L.
 
 ## 與其他筆記的關聯
-* 與 [[OPSPF_Orbit_Prediction_Shortest_Path_First_Routing_for_Resilient_LEO_Satellite_Networks]]（OPSPF）直接相關：同一個團隊（Tian Pan、Tao Huang，BUPT），StableRoute 引用 OPSPF 為 [5]，可以看成它的後續。
+### OPSPF（同團隊、直接前作）
+* [[OPSPF_Orbit_Prediction_Shortest_Path_First_Routing_for_Resilient_LEO_Satellite_Networks]]：同一個團隊（Tian Pan、Tao Huang，BUPT），StableRoute 引用 OPSPF 為 [5]，可以看成它的後續。
     * **OPSPF 解決「什麼時候重算」**：用軌道預測拓樸，每 1 秒在本地重跑 Dijkstra，突發故障再用 OSPF 補。但每次重算都是無狀態的 Dijkstra，不管路徑穩不穩定。
     * **StableRoute 解決「重算後選哪條」**：論文 §II-B 明講 OPSPF 這類 calculation-based 方法仍會因換路造成封包亂序，所以 StableRoute 改的是 Dijkstra 本身，不是重算的時機。
     * 兩者可以疊加（inference）：把 OPSPF static module 裡的 SPF 換成 SR_L/SR_K 即可。分工也很像：SR_G 對應 OPSPF 的「可預測變化用預測處理」，SR_L 對應「突發變化用本地資訊處理」。
@@ -277,6 +311,9 @@ Next-hop set O(n²) (set size ≤ 4); CountLength O(n) over n − 1 targets; SR_
 
 * 同樣的變化，OPSPF 可能換路 2–3 次，StableRoute 盡量壓到 1 次。
 * 兩者衡量的東西也不同：OPSPF 看**控制封包數和收斂時間**（地圖更新得省不省、快不快），StableRoute 看**換路次數和 TCP 重傳**（路線穩不穩）。
+
+### 其他筆記
 * 與 [[Stable_Hierarchical_Routing_for_Operational_LEO_Networks]]（SHORT）目標相同，都是要減少路由更新，但做法不同：SHORT 用座標不變量取代 Dijkstra；StableRoute 保留 Dijkstra，只改 tie-breaking 和「容忍稍長路徑」。
 * [[Time-_Dependent_Network_Topology_Optimization_for_LEO_Satellite_Constellations]]（DoTD）在拓樸層減少換線，StableRoute 在路由層減少換路，兩者可以疊加。
 * [[Minimum-hop Constellation Design for LEO Satellite Networks]] 的 slanted grid 會改變 equal-cost path 的數量，進而影響 S2 的比例。
+* [[Delay_is_Not_an_Option_Low_Latency_Routing_in_Space]]（Handley，HotNets 2018）是背景：它用延遲當權重、每 10–50 ms 跑 Dijkstra，並用軌道預測做 source routing；也指出換到較快的路會亂序、傷 TCP。延遲權重下等長路很少，可以對照本文權重設為 1 的質疑。
